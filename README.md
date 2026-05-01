@@ -198,4 +198,4 @@ PS> opsec-check
 
 ## License
 
-MIT
+MIT. See [LICENSE](LICENSE).

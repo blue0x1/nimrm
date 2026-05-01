@@ -28,9 +28,6 @@ const
   DownloadChunkSize = 196608
   InMemoryB64ChunkSize = 196608
 
-# ─────────────────────────────────────────────────────────────────────────────
-# GSSAPI C FFI (Kerberos)
-# ─────────────────────────────────────────────────────────────────────────────
 
 when defined(linux):
   const gssLib = "libgssapi_krb5.so.2"
@@ -180,9 +177,6 @@ proc gssError(major, minor: GssUint32): string =
   if result.len == 0:
     result = fmt"major={major} minor={minor}"
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Utility helpers
-# ─────────────────────────────────────────────────────────────────────────────
 
 proc toLE16(s: string): seq[byte] =
   for c in s:
@@ -273,9 +267,6 @@ proc isManagedPe(data: string): bool =
   if clrRva == 0 or clrSize == 0: return false
   result = rvaToOffset(data, peOffset, clrRva) >= 0
 
-# ─────────────────────────────────────────────────────────────────────────────
-# MD4  (used for NT hash)
-# ─────────────────────────────────────────────────────────────────────────────
 
 proc md4(msg: openArray[byte]): array[16, byte] =
   proc fF(x, y, z: uint32): uint32 = (x and y) or ((not x) and z)
@@ -305,7 +296,6 @@ proc md4(msg: openArray[byte]): array[16, byte] =
              (uint32(m[o+2]) shl 16) or (uint32(m[o+3]) shl 24)
     let AA = A; let BB = B; let CC = C; let DD = D
 
-    # Round 1
     let s1 = [3,7,11,19]
     for idx in 0..15:
       let s = s1[idx mod 4]
@@ -315,7 +305,6 @@ proc md4(msg: openArray[byte]): array[16, byte] =
       of 2: C = rol(C + fF(D,A,B) + X[idx], s)
       else: B = rol(B + fF(C,D,A) + X[idx], s)
 
-    # Round 2
     let s2  = [3,5,9,13]
     let o2  = [0,4,8,12,1,5,9,13,2,6,10,14,3,7,11,15]
     for idx in 0..15:
@@ -326,7 +315,6 @@ proc md4(msg: openArray[byte]): array[16, byte] =
       of 2: C = rol(C + fG(D,A,B) + X[k] + 0x5A827999'u32, s)
       else: B = rol(B + fG(C,D,A) + X[k] + 0x5A827999'u32, s)
 
-    # Round 3
     let s3  = [3,9,11,15]
     let o3  = [0,8,4,12,2,10,6,14,1,9,5,13,3,11,7,15]
     for idx in 0..15:
@@ -345,9 +333,6 @@ proc md4(msg: openArray[byte]): array[16, byte] =
   for idx in 0..3: result[8+idx]  = byte((C shr (idx*8)) and 0xFF)
   for idx in 0..3: result[12+idx] = byte((D shr (idx*8)) and 0xFF)
 
-# ─────────────────────────────────────────────────────────────────────────────
-# MD5  (used in HMAC-MD5 for NTLMv2)
-# ─────────────────────────────────────────────────────────────────────────────
 
 proc md5(data: openArray[byte]): array[16, byte] =
   const T: array[64, uint32] = [
@@ -448,7 +433,6 @@ proc hexNibble(c: char): int =
   else: -1
 
 proc parseNtHash(hashSpec: string): array[16, byte] =
-  ## Accept either NT hash alone or LM:NT. Only the NT half is used for NTLMv2.
   var h = hashSpec.strip()
   if ":" in h:
     h = h.split(':')[^1].strip()
@@ -462,9 +446,6 @@ proc parseNtHash(hashSpec: string): array[16, byte] =
       raise newException(ValueError, "NT hash contains non-hex characters")
     result[i] = byte((hi shl 4) or lo)
 
-# ─────────────────────────────────────────────────────────────────────────────
-# NTLM message builder
-# ─────────────────────────────────────────────────────────────────────────────
 
 const
   NTLM_SIG    = "NTLMSSP\x00"
@@ -475,12 +456,10 @@ proc buildNtlmNegotiate(): string =
   for c in NTLM_SIG: msg.add byte(ord(c))
   let t = toLE32(1'u32); msg.add t
   let f = toLE32(NTLM_FLAGS); msg.add f
-  # DomainName / Workstation fields (empty, offset 40)
   for _ in 0..1:
     msg.add 0'u8; msg.add 0'u8   # length
     msg.add 0'u8; msg.add 0'u8   # maxLen
     msg.add 0x28'u8; msg.add 0'u8; msg.add 0'u8; msg.add 0'u8
-  # Version: Win 6.1
   msg.add [0x06'u8,0x01,0x00,0x00,0x00,0x00,0x00,0x0f]
   result = cast[string](msg)
 
@@ -521,11 +500,9 @@ proc buildNtlmAuthenticate(
   var ts: array[8, byte]
   for i in 0..7: ts[i] = byte((wt shr (i*8)) and 0xFF)
 
-  # NTHash key: HMAC-MD5(NH, upper(user)+domain in UTF-16LE)
   let utd   = toLE16(username.toUpperAscii() & domain)
   let nhKey = hmacMd5(nh, utd)
 
-  # Blob
   var blob: seq[byte]
   blob.add [0x01'u8,0x01,0x00,0x00,0x00,0x00,0x00,0x00]
   blob.add ts
@@ -588,15 +565,10 @@ proc buildNtlmAuthenticate(
   msg.add payload
   result = cast[string](msg)
 
-# ─────────────────────────────────────────────────────────────────────────────
-# GSSAPI / Kerberos helpers
-# ─────────────────────────────────────────────────────────────────────────────
 
 proc importSpn(host, realm, spnOverride: string): GssNameT =
   var minor: GssUint32
 
-  # Explicit override, for cases where the service ticket SPN differs from
-  # the target host name used in the WinRM URL.
   let explicitSpn = spnOverride.strip()
   if explicitSpn != "":
     var ibufExplicit = GssBufferDesc(length: csize_t(explicitSpn.len), value: cstring(explicitSpn))
@@ -616,7 +588,6 @@ proc importSpn(host, realm, spnOverride: string): GssNameT =
       return result
     raise newException(OSError, "gss_import_name failed for SPN override " & explicitSpn & ": " & gssError(impExplicit, minor))
 
-  # Normalize host: strip port, trailing dot and lowercase
   var hostOnly = host.strip()
   if hostOnly.len > 0 and hostOnly[hostOnly.len-1] == '.':
     hostOnly = hostOnly[0..hostOnly.len-2]
@@ -628,7 +599,6 @@ proc importSpn(host, realm, spnOverride: string): GssNameT =
   if realmNorm.len > 0:
     realmNorm = realmNorm.toUpperAscii()
 
-  # Prepare OIDs
   var krbPrincipalElems: array[10, byte] = [0x2a'u8, 0x86, 0x48, 0x86, 0xf7, 0x12, 0x01, 0x02, 0x02, 0x01]
   var krbPrincipalDesc  = GssOidDesc(length: 10, elements: addr krbPrincipalElems[0])
   var svcElems: array[6, byte] = [0x2b'u8, 0x06, 0x01, 0x05, 0x06, 0x02]
@@ -638,7 +608,6 @@ proc importSpn(host, realm, spnOverride: string): GssNameT =
   var lastMin: GssUint32 = 0
   var chosenSpn = ""
 
-  # 1. If realm provided, try Kerberos principal with explicit realm first (HTTP/host@REALM) — avoids canonicalization surprises
   if realmNorm != "":
     chosenSpn = "HTTP/" & hostOnly & "@" & realmNorm
     var ibufRealm = GssBufferDesc(length: csize_t(chosenSpn.len), value: cstring(chosenSpn))
@@ -650,7 +619,6 @@ proc importSpn(host, realm, spnOverride: string): GssNameT =
     else:
       if lastMaj == 0: lastMaj = impRealm; lastMin = minor
 
-  # 2. Try Windows-style host-based service name (HTTP/host)
   chosenSpn = "HTTP/" & hostOnly
   var ibufSlash = GssBufferDesc(length: csize_t(chosenSpn.len), value: cstring(chosenSpn))
   let impSlash = gss_import_name(addr minor, addr ibufSlash, addr svcDesc, addr result)
@@ -661,7 +629,6 @@ proc importSpn(host, realm, spnOverride: string): GssNameT =
   else:
     if lastMaj == 0: lastMaj = impSlash; lastMin = minor
 
-  # 3. Try Kerberos principal without explicit realm (HTTP/host)
   chosenSpn = "HTTP/" & hostOnly
   var ibufOld = GssBufferDesc(length: csize_t(chosenSpn.len), value: cstring(chosenSpn))
   let impOld = gss_import_name(addr minor, addr ibufOld, addr krbPrincipalDesc, addr result)
@@ -672,7 +639,6 @@ proc importSpn(host, realm, spnOverride: string): GssNameT =
   else:
     if lastMaj == 0: lastMaj = impOld; lastMin = minor
 
-  # 4. Try GSS_C_NT_HOSTBASED_SERVICE (service@host) as a fallback
   chosenSpn = "HTTP@" & hostOnly
   var ibufAt = GssBufferDesc(length: csize_t(chosenSpn.len), value: cstring(chosenSpn))
   let impAt = gss_import_name(addr minor, addr ibufAt, addr svcDesc, addr result)
@@ -761,7 +727,6 @@ proc unwrapResponse(ctx: GssCtxId, body: string): string =
 
   var dataStart = octetIdx + octetMarker.len
   
-  # Skip headers and find binary start
   let marker = "\r\n"
   let bodyStart = body.find(marker, dataStart)
   if bodyStart < 0: return body
@@ -810,9 +775,6 @@ proc unwrapResponse(ctx: GssCtxId, body: string): string =
     let p = cast[ptr UncheckedArray[byte]](iov[1].buffer.value)
     for i in 0..<int(iov[1].buffer.length): result.add char(p[i])
 
-# ─────────────────────────────────────────────────────────────────────────────
-# WinRM SOAP builders
-# ─────────────────────────────────────────────────────────────────────────────
 
 proc genUuid(): string =
   var b: array[16, byte]
@@ -1009,9 +971,6 @@ proc soapDelete(host: string, port: int, ssl: bool, shellId: string): string =
 <s:Body/>
 </s:Envelope>"""
 
-# ─────────────────────────────────────────────────────────────────────────────
-# XML helpers
-# ─────────────────────────────────────────────────────────────────────────────
 
 proc xmlVal(xml, tag: string): string =
   let open  = "<" & tag
@@ -1091,12 +1050,8 @@ proc faultText(xml: string): string =
   if code != "": return code
   result = ""
 
-# ─────────────────────────────────────────────────────────────────────────────
-# HTTP auth helpers — get WWW-Authenticate value
-# ─────────────────────────────────────────────────────────────────────────────
 
 proc wwwAuth(resp: Response): string =
-  ## Compatible way to get WWW-Authenticate across Nim httpclient versions
   for key, val in resp.headers:
     if key.toLowerAscii() == "www-authenticate":
       return $val
@@ -1121,9 +1076,6 @@ proc debugHttpFailure(whereAt: string, resp: Response) =
     let preview = resp.body[0..min(300, resp.body.len - 1)]
     styledEcho(fgYellow, "[debug] Body preview: " & preview)
 
-# ─────────────────────────────────────────────────────────────────────────────
-# WinRM client type
-# ─────────────────────────────────────────────────────────────────────────────
 
 type
   AuthMethod = enum amNtlm, amKerberos
@@ -1256,7 +1208,6 @@ proc doKerb(c: var WinRMClient, body: string): tuple[status, body: string] =
 
     c.authenticated = true
 
-  # Leg 2+: Encrypted Request (NO Authorization header)
   var headers = soapHdrs()
   let encBody = wrapSoap(c.ctx, body)
   headers["Content-Type"] = "multipart/encrypted;protocol=\"application/HTTP-Kerberos-session-encrypted\";boundary=\"Encrypted Boundary\""
@@ -1310,7 +1261,6 @@ proc send(c: var WinRMClient, body: string): string =
   if code == 401:
     raise newException(IOError, "Authentication failed (401)")
   if code notin {200, 201, 202}:
-    # HTTP 500 with decrypted SOAP XML: let caller parse it (may contain ShellId or CommandId)
     if code == 500 and ("<s:Envelope" in respBody or "<Envelope" in respBody):
       result = respBody
       return
@@ -1639,12 +1589,10 @@ proc drawProgress(label: string, current, total: int) =
     elif b < 1048576: formatFloat(b.float / 1024.0,    ffDecimal, 1) & " KB"
     else:             formatFloat(b.float / 1048576.0, ffDecimal, 2) & " MB"
 
-  # spinner (cyan braille) → yellow ✔ when done
   let spin = if done: "\e[1;33m✔\e[0m"
              else: "\e[36m" & spinFrames[spinIdx mod spinFrames.len] & "\e[0m"
   inc spinIdx
 
-  # bar: cyan fill ━, yellow tip ╸, dark empty ╌
   var bar = ""
   for i in 0..<barWidth:
     if i < nFill:                 bar.add("\e[36m━")
@@ -1652,13 +1600,10 @@ proc drawProgress(label: string, current, total: int) =
     else:                         bar.add("\e[90m╌")
   bar.add("\e[0m")
 
-  # percentage — yellow (matches banner subtitle)
   let pctStr = (if done: "\e[1;33m" else: "\e[33m") & align($pct & "%", 4) & "\e[0m"
 
-  # size — dim white
   let sizeStr = "\e[37m" & fmtBytes(current) & "\e[90m/\e[37m" & fmtBytes(total) & "\e[0m"
 
-  # speed + ETA
   var extras = ""
   if done:
     extras = "  \e[90mdone in \e[33m" & formatFloat(elapsed, ffDecimal, 1) & "s\e[0m"
@@ -2178,9 +2123,6 @@ proc deleteShell(c: var WinRMClient) =
   except: discard
   c.shellId = ""
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Banner
-# ─────────────────────────────────────────────────────────────────────────────
 
 proc banner() =
   styledEcho(fgCyan,
@@ -2229,11 +2171,6 @@ Options:
   anything else      Run as PowerShell  (EncodedCommand)
 """
 
-# ─────────────────────────────────────────────────────────────────────────────
-# ─────────────────────────────────────────────────────────────────────────────
-# Readline with history (up/down arrow navigation)
-# ─────────────────────────────────────────────────────────────────────────────
-
 when defined(posix):
   import posix
 
@@ -2244,7 +2181,6 @@ when defined(posix):
   proc tcgetattr(fd: cint; t: ptr Termios): cint {.importc, header: "<termios.h>".}
   proc tcsetattr(fd: cint; action: cint; t: ptr Termios): cint {.importc, header: "<termios.h>".}
 
-  # Linux hardcoded — importc const defaults to 0 which silently breaks the bitmask
   const TCSANOW_C = 0.cint
   const F_ICANON  = 0x00000002.cuint
   const F_ECHO    = 0x00000008.cuint
@@ -2272,11 +2208,15 @@ proc readLineHistory*(prompt: string; history: var seq[string]): string =
     stdout.write(prompt); stdout.flushFile()
 
     var buf     = ""
+    var cursor  = 0
     var histIdx = history.len
     var saved   = ""
 
     proc redraw() =
       stdout.write("\r\x1b[2K" & prompt & buf)
+      let back = buf.len - cursor
+      if back > 0:
+        stdout.write("\x1b[" & $back & "D")
       stdout.flushFile()
 
     while true:
@@ -2286,8 +2226,9 @@ proc readLineHistory*(prompt: string; history: var seq[string]): string =
         stdout.write("\n"); stdout.flushFile()
         result = buf; break
       of '\x7f', '\x08':
-        if buf.len > 0:
-          buf.setLen(buf.len - 1)
+        if cursor > 0:
+          buf.delete((cursor - 1)..(cursor - 1))
+          dec cursor
           redraw()
       of '\x1b':
         let c2 = rawRead()
@@ -2299,25 +2240,33 @@ proc readLineHistory*(prompt: string; history: var seq[string]): string =
             if histIdx > 0:
               dec histIdx
               buf = history[histIdx]
+              cursor = buf.len
               redraw()
           of 'B':
             if histIdx < history.len:
               inc histIdx
               buf = if histIdx == history.len: saved else: history[histIdx]
+              cursor = buf.len
               redraw()
+          of 'C':
+            if cursor < buf.len:
+              inc cursor
+              stdout.write("\x1b[C"); stdout.flushFile()
+          of 'D':
+            if cursor > 0:
+              dec cursor
+              stdout.write("\x1b[D"); stdout.flushFile()
           else: discard
         else: discard
       of '\x03':
         stdout.write("\n"); stdout.flushFile()
         result = ""; break
       else:
-        buf.add(c)
-        stdout.write(c); stdout.flushFile()
+        buf.insert($c, cursor)
+        inc cursor
+        redraw()
 
     discard tcsetattr(STDIN_FILENO, TCSANOW_C, addr orig)
-
-# Main
-# ─────────────────────────────────────────────────────────────────────────────
 
 proc main() =
   randomize()
@@ -2403,7 +2352,6 @@ proc main() =
   if password == "" and ntHash == "" and not useKerb:
     stdout.write("Password: ")
     stdout.flushFile()
-    # Disable echo on POSIX
     when defined(posix):
       var cmd = "stty -echo"
       discard execShellCmd(cmd)
@@ -2412,7 +2360,6 @@ proc main() =
       discard execShellCmd("stty echo")
     echo ""
 
-  # Split user/domain
   var user   = username
   var domain = realm
   if "@" in username:
@@ -2428,7 +2375,6 @@ proc main() =
     var cc = getEnv("KRB5CCNAME")
     if cc == "" and fileExists("c.roberts.ccache"):
       cc = "FILE:" & absolutePath("c.roberts.ccache")
-    # Normalize bare paths (no scheme prefix) to FILE: + absolute path
     const schemes = ["FILE:", "MEMORY:", "DIR:", "API:", "KCM:", "KEYRING:"]
     var hasScheme = false
     for s in schemes:
@@ -2491,7 +2437,6 @@ proc main() =
   styledEcho(fgWhite, "Type commands below. 'exit'/'quit' to end. Prefix '!' for CMD.")
   echo ""
 
-  # ── Interactive loop ──────────────────────────────────────────────────────
   var cmdHistory: seq[string] = @[]
   while true:
     let promptPath =
