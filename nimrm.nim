@@ -1,6 +1,13 @@
 ## nimrm.nim
 ## Interactive WinRM Shell Client for Nim
+## Author: Chokri Hammedi (blue0x1)
+## Version: 1.0.0
 ## Compile: nim c -d:release -d:ssl nimrm.nim
+##
+## Legal notice:
+##   nimrm is intended for lawful administration, security testing, and
+##   research on systems you own or have explicit permission to access.
+##   The author is not responsible for misuse or damage caused by this tool.
 ##
 ## Features:
 ##   - NTLM authentication (manual implementation with NTLMv2)
@@ -2184,6 +2191,7 @@ proc banner() =
     " |_| |_|_|_| |_| |_|_|  |_| |_| |_|\n" &
     "       native WinRM operator shell\n")
   styledEcho(fgYellow, "  nimrm | NTLM & Kerberos | PS / CMD | file transfer | in-memory helpers")
+  styledEcho(fgRed, "  Legal: use only on systems you own or are authorized to administer.")
   echo ""
 
 proc usage() =

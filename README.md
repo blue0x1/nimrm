@@ -2,10 +2,12 @@
 
 `nimrm` is a native WinRM shell client written in Nim. It provides an interactive PowerShell-oriented remote shell with NTLM, Kerberos, file transfer, in-memory helpers, and practical administration/audit commands.
 
-Author: `blue0x1`  
+Author: `Chokri Hammedi (blue0x1)`  
 Version: `1.0.0`
 
-Use only on systems you own or have explicit permission to administer.
+## Legal Notice
+
+`nimrm` is intended for lawful administration, security testing, and research on systems you own or have explicit permission to access. The author is not responsible for misuse or damage caused by this tool.
 
 ## Features
 
