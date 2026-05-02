@@ -2793,6 +2793,8 @@ proc runCmdFastOrPsrp*(c: var WinRMClient, cmd: string, isCmd = false): string =
          "winrm error 500" in msg or "not supported" in msg or
          "wsman" in msg:
         c.cmdShellDenied = true
+      elif "command line is too long" in msg:
+        discard
       else:
         raise
   result = runCmd(c, cmd, isCmd, true)

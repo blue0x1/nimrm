@@ -480,7 +480,8 @@ try {
   W 'Domain info' $_.Exception.Message
 }
 """
-  let output = runCmdFast(c, cmd, false)
+  ensureShell(c, true)
+  let output = runCmd(c, cmd, false, true)
   if output.len > 0:
     stdout.write(output)
     if not output.endsWith("\n"):
@@ -574,7 +575,8 @@ try {
 'Process creation: Security 4688 when Audit Process Creation is enabled; command lines only if the registry policy above is enabled.'
 'Transcript files: written when PowerShell Transcription is enabled and OutputDirectory is configured.'
 """
-  let output = runCmdFast(c, cmd, false)
+  ensureShell(c, true)
+  let output = runCmd(c, cmd, false, true)
   if output.len > 0:
     stdout.write(output)
     if not output.endsWith("\n"):
