@@ -18,12 +18,12 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/NTLM-2f81f7?style=for-the-badge" alt="NTLM">
-  <img src="https://img.shields.io/badge/Kerberos-f85149?style=for-the-badge" alt="Kerberos">
-  <img src="https://img.shields.io/badge/PowerShell-2f81f7?style=for-the-badge" alt="PowerShell">
-  <img src="https://img.shields.io/badge/File%20Transfer-f85149?style=for-the-badge" alt="File Transfer">
-  <img src="https://img.shields.io/badge/In--Memory-2f81f7?style=for-the-badge" alt="In-Memory Helpers">
-  <img src="https://img.shields.io/badge/Multi--Session-f85149?style=for-the-badge" alt="Multi-Session">
+  <img src="https://img.shields.io/badge/NTLM-08f5f9?style=for-the-badge" alt="NTLM">
+  <img src="https://img.shields.io/badge/Kerberos-fc1383?style=for-the-badge" alt="Kerberos">
+  <img src="https://img.shields.io/badge/PowerShell-08f5f9?style=for-the-badge" alt="PowerShell">
+  <img src="https://img.shields.io/badge/File%20Transfer-fc1383?style=for-the-badge" alt="File Transfer">
+  <img src="https://img.shields.io/badge/In--Memory-08f5f9?style=for-the-badge" alt="In-Memory Helpers">
+  <img src="https://img.shields.io/badge/Multi--Session-fc1383?style=for-the-badge" alt="Multi-Session">
 </p>
 
 ---
