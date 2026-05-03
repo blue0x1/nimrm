@@ -185,8 +185,6 @@ One-shot command:
 | `-Z`, `--krb-zone` | Kerberos realm override |
 | `-K`, `--kerb-spn` | Kerberos SPN override |
 | `-k`, `--kerb` | Use Kerberos authentication |
-| `--message-encryption` | NTLM HTTP message encryption: `auto`, `always`, or `never` |
-| `--seal` | Alias for `--message-encryption always` |
 | `-c`, `--command` | Execute one command and exit |
 | `--tls` | Use HTTPS/TLS |
 | `-h`, `--help` | Show help |
