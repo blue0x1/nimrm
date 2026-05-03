@@ -1174,6 +1174,11 @@ proc main() =
   echo ""
 
   var currentPath = if user != "": "C:\\Users\\" & user else: ""
+  if currentPath == "":
+    try:
+      currentPath = runCmdFastOrPsrp(client, "(Get-Location).Path", false).strip()
+    except:
+      discard
   client.remoteCwd = currentPath
   var cmdHistory: seq[string] = @[]
   while true:

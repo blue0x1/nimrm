@@ -892,6 +892,31 @@ proc importSpn(host, realm, spnOverride: string): GssNameT =
   else:
     if lastMaj == 0: lastMaj = impAt; lastMin = minor
 
+  if realmNorm != "":
+    chosenSpn = "http/" & hostOnly & "@" & realmNorm
+    var ibufLcRealm = GssBufferDesc(length: csize_t(chosenSpn.len), value: cstring(chosenSpn))
+    let impLcRealm = gss_import_name(addr minor, addr ibufLcRealm, GSS_C_NO_OID, addr result)
+    if impLcRealm == GSS_S_COMPLETE:
+      if getEnv("WINRMSHELL_DEBUG") == "1":
+        styledEcho(fgYellow, "[*] importSpn: imported " & chosenSpn & " as KRB5 principal (lowercase http, with realm)")
+      return result
+
+  chosenSpn = "http/" & hostOnly
+  var ibufLcSlash = GssBufferDesc(length: csize_t(chosenSpn.len), value: cstring(chosenSpn))
+  let impLcSlash = gss_import_name(addr minor, addr ibufLcSlash, addr krbPrincipalDesc, addr result)
+  if impLcSlash == GSS_S_COMPLETE:
+    if getEnv("WINRMSHELL_DEBUG") == "1":
+      styledEcho(fgYellow, "[*] importSpn: imported " & chosenSpn & " as Kerberos principal (lowercase http)")
+    return result
+
+  chosenSpn = "http@" & hostOnly
+  var ibufLcAt = GssBufferDesc(length: csize_t(chosenSpn.len), value: cstring(chosenSpn))
+  let impLcAt = gss_import_name(addr minor, addr ibufLcAt, addr svcDesc, addr result)
+  if impLcAt == GSS_S_COMPLETE:
+    if getEnv("WINRMSHELL_DEBUG") == "1":
+      styledEcho(fgYellow, "[*] importSpn: imported " & chosenSpn & " as host-based service (lowercase http)")
+    return result
+
   if getEnv("WINRMSHELL_DEBUG") == "1":
     styledEcho(fgRed, "[*] importSpn: failed attempts, last error: " & gssError(if lastMaj != 0: lastMaj else: impAt, if lastMaj != 0: lastMin else: minor))
 
@@ -2077,8 +2102,27 @@ proc doKerb(c: var WinRMClient, body: string): tuple[status, body: string] =
       nil, nil, addr obuf, addr retf, addr trec)
 
     if maj1 != GSS_S_COMPLETE and maj1 != GSS_S_CONTINUE_NEEDED:
-      var m2: GssUint32; discard gss_release_name(addr m2, addr tgt)
-      raise newException(OSError, "gss_init_sec_context failed: " & gssError(maj1, minor))
+      let errMsg = gssError(maj1, minor).toLowerAscii()
+      if "matching credential not found" in errMsg and c.spn.strip() == "":
+        var m2: GssUint32; discard gss_release_name(addr m2, addr tgt)
+        var hostLc = c.host.strip().toLowerAscii()
+        if ':' in hostLc: hostLc = hostLc.split(':')[0]
+        var lcSpn = "http/" & hostLc
+        if c.domain.strip() != "":
+          lcSpn = lcSpn & "@" & c.domain.strip().toUpperAscii()
+        tgt = importSpn(c.host, c.domain, lcSpn)
+        c.ctx = nil
+        obuf = GssBufferDesc(length: 0, value: nil)
+        let maj1r = gss_init_sec_context(
+          addr minor, GSS_C_NO_CREDENTIAL, addr c.ctx,
+          tgt, GSS_C_NO_OID, 0x3A'u32, 0, nil,
+          nil, nil, addr obuf, addr retf, addr trec)
+        if maj1r != GSS_S_COMPLETE and maj1r != GSS_S_CONTINUE_NEEDED:
+          var m3: GssUint32; discard gss_release_name(addr m3, addr tgt)
+          raise newException(OSError, "gss_init_sec_context failed: " & gssError(maj1r, minor))
+      else:
+        var m2: GssUint32; discard gss_release_name(addr m2, addr tgt)
+        raise newException(OSError, "gss_init_sec_context failed: " & gssError(maj1, minor))
 
     var outTok = ""
     if obuf.value != nil and obuf.length > 0:
