@@ -24,6 +24,16 @@ import std/[
 
 import winrm
 
+type
+  Session = ref object
+    name: string
+    client: WinRMClient
+    currentPath: string
+    host: string
+    user: string
+    authStr: string
+    connected: bool
+
 const
   DownloadChunkSize = 524288
   DownloadBinaryChunkSize = 65536
@@ -894,6 +904,12 @@ Options:
   opsec-check        Show logging, auditing, and PowerShell policy posture
   execute-assembly <f> [a] Run .NET exe/dll from local bytes or remote file bytes in memory
   anything else      Run as PowerShell  (EncodedCommand)
+
+ Session management:
+  sessions           List all active sessions
+  session <opts>     Create new session  (e.g. session -T host -A user -P pass [-n name])
+  use <name|id>      Switch to a session
+  kill <name|id>     Close and remove a session
 """
 
 when defined(posix):
@@ -992,6 +1008,180 @@ proc readLineHistory*(prompt: string; history: var seq[string]): string =
         redraw()
 
     discard tcsetattr(STDIN_FILENO, TCSANOW_C, addr orig)
+
+var sessions: seq[Session] = @[]
+var activeIdx = -1
+
+proc activeSession(): Session =
+  if activeIdx >= 0 and activeIdx < sessions.len: sessions[activeIdx] else: nil
+
+proc findSession(name: string): int =
+  for i, s in sessions:
+    if s.name == name: return i
+  try:
+    let idx = parseInt(name) - 1
+    if idx >= 0 and idx < sessions.len: return idx
+  except:
+    discard
+  return -1
+
+proc listSessions() =
+  if sessions.len == 0:
+    styledEcho(fgYellow, "[*] No active sessions")
+    return
+  echo ""
+  styledEcho(fgWhite, "  ID  Name              Target                    User              Auth")
+  styledEcho(fgWhite, "  --  ----              ------                    ----              ----")
+  for i, s in sessions:
+    let marker = if i == activeIdx: " *" else: "  "
+    let id = align($(i + 1), 2)
+    let name = alignLeft(s.name, 16)
+    let target = alignLeft(s.host, 24)
+    let user = alignLeft(if s.user != "": s.user else: "(kerberos)", 16)
+    let color = if i == activeIdx: fgGreen else: fgWhite
+    styledEcho(color, marker & id & "  " & name & "  " & target & "  " & user & "  " & s.authStr)
+  echo ""
+
+proc killSession(name: string) =
+  let idx = findSession(name)
+  if idx < 0:
+    styledEcho(fgRed, "[!] Session not found: " & name)
+    return
+  let s = sessions[idx]
+  try:
+    deleteShell(s.client)
+    closeNtlm(s.client)
+  except:
+    discard
+  styledEcho(fgYellow, "[*] Killed session: " & s.name)
+  sessions.delete(idx)
+  if activeIdx == idx:
+    activeIdx = if sessions.len > 0: 0 else: -1
+  elif activeIdx > idx:
+    dec activeIdx
+
+proc switchSession(name: string) =
+  let idx = findSession(name)
+  if idx < 0:
+    styledEcho(fgRed, "[!] Session not found: " & name)
+    return
+  activeIdx = idx
+  let s = sessions[idx]
+  styledEcho(fgGreen, "[*] Switched to session: " & s.name & " (" & s.host & ")")
+
+proc createNewSession(args: seq[string]) =
+  var host, username, password, ntHash, realm, spn: string
+  var customPort = 0
+  var portSet = false
+  var useKerb = false
+  var useSSL = false
+  var sessionName = ""
+
+  var i = 0
+  while i < args.len:
+    let a = args[i]
+    case a
+    of "-T", "--target":
+      if i + 1 < args.len: inc i; host = args[i]
+    of "-A", "--account":
+      if i + 1 < args.len: inc i; username = args[i]
+    of "-P", "--secret":
+      if i + 1 < args.len: inc i; password = args[i]
+    of "-N", "--nt-proof":
+      if i + 1 < args.len: inc i; ntHash = args[i]
+    of "-Z", "--krb-zone":
+      if i + 1 < args.len: inc i; realm = args[i]
+    of "-K", "--kerb-spn":
+      if i + 1 < args.len: inc i; spn = args[i]
+    of "-k", "--kerb":
+      useKerb = true
+    of "--tls", "--ssl":
+      useSSL = true
+    of "-p", "--port":
+      if i + 1 < args.len:
+        inc i
+        try: customPort = parseInt(args[i]); portSet = true
+        except: styledEcho(fgRed, "[!] Invalid port"); return
+    of "-n", "--name":
+      if i + 1 < args.len: inc i; sessionName = args[i]
+    else:
+      discard
+    inc i
+
+  if host == "":
+    styledEcho(fgRed, "[!] -T <host> is required")
+    return
+  if username == "" and not useKerb:
+    styledEcho(fgRed, "[!] -A <user> is required (or use -k for Kerberos)")
+    return
+  if password == "" and ntHash == "" and not useKerb:
+    styledEcho(fgRed, "[!] -P <password> or -N <hash> or -k is required")
+    return
+
+  var user = username
+  var domain = realm
+  if "@" in username:
+    let parts = username.split('@')
+    user = parts[0]
+    if domain == "": domain = parts[1]
+  elif "\\" in username:
+    let parts = username.split('\\')
+    if domain == "": domain = parts[0]
+    user = parts[1]
+
+  if useKerb:
+    var cc = getEnv("KRB5CCNAME")
+    const schemes = ["FILE:", "MEMORY:", "DIR:", "API:", "KCM:", "KEYRING:"]
+    var hasScheme = false
+    for s in schemes:
+      if cc.startsWith(s): hasScheme = true; break
+    if cc != "" and not hasScheme:
+      cc = "FILE:" & absolutePath(cc)
+    if cc != "":
+      putEnv("KRB5CCNAME", cc)
+
+  let port = if portSet: customPort else: (if useSSL: 5986 else: 5985)
+  let authStr = if useKerb: "Kerberos" else: "NTLM"
+  let authMethod = if useKerb: amKerberos else: amNtlm
+
+  if sessionName == "":
+    sessionName = "session-" & $(sessions.len + 1)
+
+  for s in sessions:
+    if s.name == sessionName:
+      styledEcho(fgRed, "[!] Session name already exists: " & sessionName)
+      return
+
+  styledEcho(fgWhite, "[*] Connecting to " & host & ":" & $port & " ...")
+  var client = newClient(host, user, password, ntHash, spn, domain, authMethod, useSSL, port)
+
+  try:
+    warmSmartShell(client)
+  except Exception as e:
+    styledEcho(fgRed, "[!] Connection failed: " & e.msg)
+    try: closeNtlm(client)
+    except: discard
+    return
+
+  var currentPath = if user != "": "C:\\Users\\" & user else: ""
+  if currentPath == "":
+    try:
+      currentPath = runCmdFastOrPsrp(client, "(Get-Location).Path", false).strip()
+    except:
+      discard
+  client.remoteCwd = currentPath
+
+  let s = Session(
+    name: sessionName,
+    client: client,
+    currentPath: currentPath,
+    host: host & ":" & $port,
+    user: user,
+    authStr: authStr,
+    connected: true)
+  sessions.add(s)
+  activeIdx = sessions.len - 1
+  styledEcho(fgGreen, "[+] Session created: " & sessionName & " (" & host & ":" & $port & ")")
 
 proc main() =
   randomize()
@@ -1180,10 +1370,48 @@ proc main() =
     except:
       discard
   client.remoteCwd = currentPath
+
+  let initSession = Session(
+    name: "session-1",
+    client: client,
+    currentPath: currentPath,
+    host: host & ":" & $port,
+    user: user,
+    authStr: authStr,
+    connected: true)
+  sessions.add(initSession)
+  activeIdx = 0
+
   var cmdHistory: seq[string] = @[]
   while true:
+    let cur = activeSession()
+    if cur == nil:
+      styledEcho(fgYellow, "[*] No active session. Use 'session -T <host> ...' to create one or 'exit' to quit.")
+      let promptStr = ansiForegroundColorCode(fgRed) & "nimrm> " & ansiResetCode
+      var line: string
+      try:
+        line = readLineHistory(promptStr, cmdHistory).strip()
+      except EOFError:
+        echo ""; break
+      if line == "": continue
+      if line.toLowerAscii() in ["exit", "quit"]: break
+      cmdHistory.add(line)
+      let words = shellSplit(line)
+      let verb = if words.len > 0: words[0].toLowerAscii() else: ""
+      if verb == "session" and words.len > 1:
+        createNewSession(words[1..^1])
+      elif verb == "sessions":
+        listSessions()
+      elif verb in ["/help", "help"]:
+        usage()
+      else:
+        styledEcho(fgRed, "[!] No active session")
+      continue
+
+    let sessionTag = if sessions.len > 1: "[" & cur.name & "] " else: ""
     let promptStr = ansiForegroundColorCode(fgCyan) &
-      (if currentPath != "": "PS " & currentPath & "> " else: "PS> ") &
+      sessionTag &
+      (if cur.currentPath != "": "PS " & cur.currentPath & "> " else: "PS> ") &
       ansiResetCode
 
     var line: string
@@ -1201,22 +1429,33 @@ proc main() =
       let verb = if words.len > 0: words[0].toLowerAscii() else: ""
       if verb in ["/help", "help"]:
         usage()
+      elif verb == "sessions":
+        listSessions()
+      elif verb == "session":
+        if words.len > 1:
+          createNewSession(words[1..^1])
+        else:
+          styledEcho(fgWhite, "Usage: session -T <host> -A <user> -P <pass> [-n name] [-k] [--tls]")
+      elif verb == "use" and words.len >= 2:
+        switchSession(words[1])
+      elif verb == "kill" and words.len >= 2:
+        killSession(words[1])
       elif verb == "upload":
-        uploadFile(client, words[1..^1])
+        uploadFile(cur.client, words[1..^1])
       elif verb == "download":
-        downloadFile(client, words[1..^1])
+        downloadFile(cur.client, words[1..^1])
       elif verb == "upload-dir":
-        uploadDir(client, words[1..^1])
+        uploadDir(cur.client, words[1..^1])
       elif verb == "download-dir":
-        downloadDir(client, words[1..^1])
+        downloadDir(cur.client, words[1..^1])
       elif verb == "invoke-script":
-        invokeScript(client, words[1..^1])
+        invokeScript(cur.client, words[1..^1])
       elif verb == "ad-info":
-        adInfo(client)
+        adInfo(cur.client)
       elif verb == "opsec-check":
-        opsecCheck(client)
+        opsecCheck(cur.client)
       elif verb in ["execute-assembly", "exec-assembly"]:
-        executeAssembly(client, words[1..^1])
+        executeAssembly(cur.client, words[1..^1])
       else:
         let isCmd = line.startsWith("!")
         let cmd = if isCmd: line[1..^1].strip() else: line
@@ -1224,30 +1463,30 @@ proc main() =
                                    "pushd", "push-location", "popd", "pop-location"]
         var output: string
         if isDirChange and not isCmd:
-          let prefix = if currentPath != "": "Set-Location " & psQuote(currentPath) & "; "
+          let prefix = if cur.currentPath != "": "Set-Location " & psQuote(cur.currentPath) & "; "
                        else: "Set-Location $env:USERPROFILE; "
           let target = if words.len >= 2: words[1] else: ""
           let fallback = if target != "" and not target.contains(":") and not target.startsWith("\\") and not target.startsWith("/") and target notin [".", ".."]:
             "try{Set-Location (Join-Path $env:USERPROFILE " & psQuote(target) & ")}catch{Write-Error $__nimrm_cd_err.Exception.Message};"
           else:
             "Write-Error $__nimrm_cd_err.Exception.Message;"
-          let raw = runCmdFastCached(client,
+          let raw = runCmdFastCached(cur.client,
             prefix & "$ErrorActionPreference='Stop';try{" & cmd & "}catch{$__nimrm_cd_err = $_;" & fallback & "};" &
             "Write-Output \"##CD##$((Get-Location).Path)\"", false)
           var outLines: seq[string]
           for ln in raw.splitLines():
             if ln.startsWith("##CD##"):
-              currentPath = ln[6..^1].strip()
-              client.remoteCwd = currentPath
+              cur.currentPath = ln[6..^1].strip()
+              cur.client.remoteCwd = cur.currentPath
             else:
               outLines.add(ln)
           while outLines.len > 0 and outLines[^1].strip() == "":
             outLines.setLen(outLines.len - 1)
           output = if outLines.len > 0: outLines.join("\n") & "\n" else: ""
-        elif not isCmd and currentPath != "":
-          output = runCmdFastCached(client, "Set-Location " & psQuote(currentPath) & "; " & cmd, false)
+        elif not isCmd and cur.currentPath != "":
+          output = runCmdFastCached(cur.client, "Set-Location " & psQuote(cur.currentPath) & "; " & cmd, false)
         else:
-          output = runCmdFastCached(client, cmd, isCmd)
+          output = runCmdFastCached(cur.client, cmd, isCmd)
         if output.len > 0:
           stdout.write(output)
           if not output.endsWith("\n"):
@@ -1256,11 +1495,21 @@ proc main() =
     except Exception as e:
       styledEcho(fgRed, "\n[!] Error: " & e.msg)
       if isConnectionLostMessage(e.msg):
-        break
+        styledEcho(fgYellow, "[*] Session lost: " & cur.name)
+        cur.connected = false
+        if sessions.len > 1:
+          killSession(cur.name)
+          continue
+        else:
+          break
 
-  styledEcho(fgYellow, "[*] Deleting shell...")
-  deleteShell(client)
-  closeNtlm(client)
+  for s in sessions:
+    try:
+      styledEcho(fgYellow, "[*] Closing session: " & s.name)
+      deleteShell(s.client)
+      closeNtlm(s.client)
+    except:
+      discard
   styledEcho(fgGreen, "[+] Done. Goodbye!")
 
 main()
