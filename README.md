@@ -26,6 +26,11 @@
   <img src="https://img.shields.io/badge/Multi--Session-fc1383?style=for-the-badge" alt="Multi-Session">
 </p>
 
+<p align="center">
+  <a href="https://github.com/blue0x1/nimrm/wiki"><img src="https://img.shields.io/badge/Documentation-08f5f9?style=for-the-badge&logo=gitbook&logoColor=black" alt="Documentation"></a>
+  <a href="https://github.com/blue0x1/nim-winrm"><img src="https://img.shields.io/badge/WinRM%20Library-fc1383?style=for-the-badge&logo=nim&logoColor=white" alt="WinRM Library"></a>
+</p>
+
 ---
 <img width="1024" height="595" alt="image" src="https://github.com/user-attachments/assets/ee35bbe2-9d5b-4b98-9bf8-78e3286a1219" />
 
