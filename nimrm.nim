@@ -1295,8 +1295,6 @@ proc main() =
 
   if useKerb:
     var cc = getEnv("KRB5CCNAME")
-    if cc == "" and fileExists("c.roberts.ccache"):
-      cc = "FILE:" & absolutePath("c.roberts.ccache")
     const schemes = ["FILE:", "MEMORY:", "DIR:", "API:", "KCM:", "KEYRING:"]
     var hasScheme = false
     for s in schemes:
