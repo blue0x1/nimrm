@@ -1145,7 +1145,14 @@ proc createNewSession(args: seq[string]) =
   let authMethod = if useKerb: amKerberos else: amNtlm
 
   if sessionName == "":
-    sessionName = "session-" & $(sessions.len + 1)
+    var n = sessions.len + 1
+    while true:
+      sessionName = "session-" & $n
+      var exists = false
+      for s in sessions:
+        if s.name == sessionName: exists = true; break
+      if not exists: break
+      inc n
 
   for s in sessions:
     if s.name == sessionName:
