@@ -875,7 +875,7 @@ Options:
   -p, --port       WinRM port  (default 5985, or 5986 with --tls)
   -N, --nt-proof   NT hash or LM:NT hash  (NTLM pass-the-hash)
   -Z, --krb-zone   Kerberos realm  (overrides domain from -A)
-  -K, --kerb-spn   Kerberos SPN override  (e.g. HTTP/dc1.ping.htb@PING.HTB)
+  -K, --kerb-spn   Kerberos SPN override  (e.g. HTTP/dc01.corp.local@CORP.LOCAL)
   -k, --kerb       Use Kerberos auth (reads KRB5CCNAME env var)
   -c, --command    Execute one remote command, print output, then exit
       --tls        Use HTTPS on port 5986
