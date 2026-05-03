@@ -44,6 +44,7 @@
 - [Usage](#usage)
 - [Options](#options)
 - [Interactive Commands](#interactive-commands)
+- [Session Management](#session-management)
 - [Examples](#examples)
 - [Notes](#notes)
 - [License](#license)
@@ -205,6 +206,65 @@ One-shot command:
 | `execute-assembly <exe> [args]` | Run managed .NET from memory |
 | `ad-info` | Show AD/domain context |
 | `opsec-check` | Show logging and auditing posture |
+| `sessions` | List all active sessions |
+| `session <opts>` | Create a new session |
+| `use <name\|id>` | Switch to a session |
+| `kill <name\|id>` | Close and remove a session |
+
+## Session Management
+
+nimrm supports multiple concurrent WinRM sessions. You can pivot between different hosts and users without leaving the shell.
+
+Create a new session from inside an existing one:
+
+```powershell
+PS C:\Users\Administrator> session -T 10.0.0.5 -A 'CORP\user2' -P 'Pass123'
+PS C:\Users\Administrator> session -T dc02.corp.local -A user@corp.local -N aad3b435:0123456789abcdef -n dc02
+PS C:\Users\Administrator> session -T dc03.corp.local -k -Z CORP.LOCAL -n dc03
+```
+
+List active sessions:
+
+```
+PS C:\Users\Administrator> sessions
+
+  ID  Name              Target                    User              Auth
+  --  ----              ------                    ----              ----
+ * 1  session-1         dc01.corp.local:5985      administrator     Kerberos
+   2  session-2         10.0.0.5:5985             user2             NTLM
+   3  dc02              dc02.corp.local:5985      user              NTLM
+```
+
+Switch between sessions:
+
+```powershell
+[session-2] PS C:\Users\user2> use 1
+[*] Switched to session: session-1 (dc01.corp.local:5985)
+[session-1] PS C:\Users\Administrator> use dc02
+[*] Switched to session: dc02 (dc02.corp.local:5985)
+```
+
+Close a session:
+
+```powershell
+[dc02] PS C:\Users\user> kill 2
+[*] Killed session: session-2
+```
+
+Session options:
+
+| Option | Description |
+| --- | --- |
+| `-T` | Target host |
+| `-A` | Username |
+| `-P` | Password |
+| `-N` | NT hash |
+| `-k` | Kerberos auth |
+| `-Z` | Kerberos realm |
+| `-K` | SPN override |
+| `-p` | Port |
+| `--tls` | Use HTTPS |
+| `-n` | Custom session name |
 
 ## Examples
 
