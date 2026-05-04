@@ -2190,7 +2190,6 @@ proc doKerb(c: var WinRMClient, body: string): tuple[status, body: string] =
   result = (r1.status, respBody)
 
 proc resetTransport*(c: var WinRMClient) =
-  let preserveKerbState = c.auth == amKerberos
   if c.hc != nil:
     try: c.hc.close()
     except: discard
@@ -2199,13 +2198,28 @@ proc resetTransport*(c: var WinRMClient) =
     c.hc = nil
   else:
     c.hc = newHttpClient(timeout = 60_000)
-  if not preserveKerbState:
-    c.ctx = nil
-    c.authenticated = false
-    c.cmdShellId = ""
+  c.ctx = nil
+  c.authenticated = false
+  c.shellId = ""
+  c.runspaceId = ""
+  c.cmdShellId = ""
+  c.pendingCleanupCmdId = ""
   c.ntlmCliSealRC4 = nil
   c.ntlmSrvSealRC4 = nil
   c.ntlmSeqNum = 0
+
+proc isRetryableSessionLoss(c: WinRMClient, e: ref Exception): bool =
+  if not (c.authenticated or c.shellId != "" or c.cmdShellId != "" or c.ctx != nil):
+    return false
+  let m = e.msg.toLowerAscii()
+  result = e of WinRMAuthorizationError or
+           "authentication failed (401)" in m or
+           "connection lost" in m or
+           "connection closed" in m or
+           "connection was closed before full request has been made" in m or
+           "no context has been established" in m or
+           "invalid token was supplied" in m or
+           "gss_init_sec_context failed" in m
 
 proc isTransportError(e: ref CatchableError): bool =
   let m = e.msg.toLowerAscii()
@@ -2527,6 +2541,12 @@ proc waitRunspace(c: var WinRMClient) =
   if getEnv("WINRMSHELL_DEBUG") == "1":
     styledEcho(fgYellow, "[debug] Runspace did not report Opened before timeout")
 
+proc keepAliveShell*(c: var WinRMClient): bool =
+  if c.shellId == "":
+    return false
+  discard c.send(soapKeepAlive(c.host, c.port, c.useSSL, c.sessionId, c.shellId))
+  result = true
+
 proc firstCommandToken(cmd: string): string =
   var s = cmd.strip()
   if s == "": return ""
@@ -2610,6 +2630,9 @@ proc runCmdCollect*(c: var WinRMClient, cmd: string, isCmd: bool, onChunk: Chunk
         for i in 1..<frags.len:
           discard c.send(soapSendData(c.host, c.port, c.useSSL, c.sessionId, c.shellId, cmdId, frags[i]))
     except CatchableError as e:
+      if isRetryableSessionLoss(c, e) and tries > 0:
+        resetTransport(c)
+        continue
       let fc = if e of WinRMWSManFault: (ref WinRMWSManFault)(e).faultCode else: faultCode(e.msg)
       if isRetryableFault(fc) and tries > 0:
         if fc == SHELL_TOO_MANY_COMMANDS:
@@ -2835,28 +2858,44 @@ proc runPowershellBinaryOnShell(c: var WinRMClient, shellId, script: string,
       discard
 
 proc runCmdFast*(c: var WinRMClient, cmd: string, isCmd: bool): string =
-  let shellId = createCmdShell(c)
-  try:
-    result = runCmdOnShell(c, shellId, cmd, isCmd)
-  finally:
-    deleteCmdShell(c, shellId)
+  var tries = 2
+  while tries > 0:
+    dec tries
+    let shellId = createCmdShell(c)
+    try:
+      result = runCmdOnShell(c, shellId, cmd, isCmd)
+      return
+    except CatchableError as e:
+      if isRetryableSessionLoss(c, e) and tries > 0:
+        resetTransport(c)
+        continue
+      raise
+    finally:
+      deleteCmdShell(c, shellId)
 
 proc runCmdFastCached*(c: var WinRMClient, cmd: string, isCmd: bool,
                        onChunk: ChunkCallback = nil): string =
   if c.cmdShellDenied:
     return runCmdCollect(c, cmd, isCmd, onChunk, true)
-  try:
-    let useCmd = isCmd or shouldRunViaCmd(cmd)
-    result = runCmdOnShell(c, ensureCmdShell(c), cmd, useCmd, onChunk)
-  except Exception as e:
-    let msg = e.msg.toLowerAscii()
-    c.cmdShellId = ""
-    if "access is denied" in msg or "could not find shellid" in msg or
-       "winrm error 500" in msg or "not supported" in msg or
-       "wsman" in msg:
-      c.cmdShellDenied = true
-      return runCmdCollect(c, cmd, isCmd, onChunk, true)
-    raise
+  var tries = 2
+  let useCmd = isCmd or shouldRunViaCmd(cmd)
+  while tries > 0:
+    dec tries
+    try:
+      result = runCmdOnShell(c, ensureCmdShell(c), cmd, useCmd, onChunk)
+      return
+    except Exception as e:
+      let msg = e.msg.toLowerAscii()
+      c.cmdShellId = ""
+      if isRetryableSessionLoss(c, e) and tries > 0:
+        resetTransport(c)
+        continue
+      if "access is denied" in msg or "could not find shellid" in msg or
+         "winrm error 500" in msg or "not supported" in msg or
+         "wsman" in msg:
+        c.cmdShellDenied = true
+        return runCmdCollect(c, cmd, isCmd, onChunk, true)
+      raise
 
 proc warmSmartShell*(c: var WinRMClient) =
   let interactiveStatus = getEnv("WINRMSHELL_STATUS") != "0"
@@ -2898,16 +2937,23 @@ proc runBinaryFastCached*(c: var WinRMClient, script: string,
                           onChunk: ChunkCallback = nil): string =
   if c.cmdShellDenied:
     raise newException(IOError, "WinRS binary stream unavailable for this session")
-  try:
-    result = runPowershellBinaryOnShell(c, ensureCmdShell(c), script, onChunk)
-  except Exception as e:
-    let msg = e.msg.toLowerAscii()
-    c.cmdShellId = ""
-    if "access is denied" in msg or "could not find shellid" in msg or
-       "winrm error 500" in msg or "not supported" in msg or
-       "wsman" in msg:
-      c.cmdShellDenied = true
-    raise
+  var tries = 2
+  while tries > 0:
+    dec tries
+    try:
+      result = runPowershellBinaryOnShell(c, ensureCmdShell(c), script, onChunk)
+      return
+    except Exception as e:
+      let msg = e.msg.toLowerAscii()
+      c.cmdShellId = ""
+      if isRetryableSessionLoss(c, e) and tries > 0:
+        resetTransport(c)
+        continue
+      if "access is denied" in msg or "could not find shellid" in msg or
+         "winrm error 500" in msg or "not supported" in msg or
+         "wsman" in msg:
+        c.cmdShellDenied = true
+      raise
 
 proc uploadFileStream*(c: var WinRMClient, data: string, setup: string, total: int) =
   let shellId = createCmdShell(c)

@@ -33,6 +33,7 @@ type
     user: string
     authStr: string
     connected: bool
+    lastKeepAliveAt: float
 
 const
   DownloadChunkSize = 524288
@@ -102,6 +103,24 @@ proc remoteDisplayPwd(c: WinRMClient): string =
 
 proc isAuthFailure(e: ref Exception): bool =
   result = e of WinRMAuthorizationError
+
+proc sessionKeepAlive(s: Session) =
+  if s == nil or not s.connected:
+    return
+  if s.client.shellId == "":
+    return
+  if epochTime() - s.lastKeepAliveAt < 5.0:
+    return
+  try:
+    discard keepAliveShell(s.client)
+    s.lastKeepAliveAt = epochTime()
+  except CatchableError:
+    try:
+      resetTransport(s.client)
+      ensureShell(s.client)
+      s.lastKeepAliveAt = epochTime()
+    except CatchableError:
+      discard
 
 proc resolveRemoteFile(c: var WinRMClient, setup, requested: string): tuple[path: string, size: int] =
   let probe = setup &
@@ -936,7 +955,8 @@ when defined(posix):
     discard posix.read(STDIN_FILENO, addr ch, 1)
     ch
 
-proc readLineHistory*(prompt: string; history: var seq[string]): string =
+proc readLineHistory*(prompt: string; history: var seq[string];
+                      onTick: proc() = nil; tickMs = 1000): string =
   when not defined(posix):
     stdout.write(prompt); stdout.flushFile()
     return stdin.readLine()
@@ -955,6 +975,9 @@ proc readLineHistory*(prompt: string; history: var seq[string]): string =
     var cursor  = 0
     var histIdx = history.len
     var saved   = ""
+    var pfd: TPollfd
+    pfd.fd = STDIN_FILENO.cint
+    pfd.events = POLLIN.cshort
 
     proc redraw() =
       stdout.write("\r\x1b[2K" & prompt & buf)
@@ -964,6 +987,10 @@ proc readLineHistory*(prompt: string; history: var seq[string]): string =
       stdout.flushFile()
 
     while true:
+      if poll(addr pfd, Tnfds(1), tickMs) <= 0:
+        if onTick != nil:
+          onTick()
+        continue
       let c = rawRead()
       case c
       of '\r', '\n':
@@ -1188,7 +1215,8 @@ proc createNewSession(args: seq[string]) =
     host: host & ":" & $port,
     user: user,
     authStr: authStr,
-    connected: true)
+    connected: true,
+    lastKeepAliveAt: epochTime())
   sessions.add(s)
   activeIdx = sessions.len - 1
   styledEcho(fgGreen, "[+] Session created: " & sessionName & " (" & host & ":" & $port & ")")
@@ -1403,7 +1431,8 @@ proc main() =
       let promptStr = ansiForegroundColorCode(fgRed) & "nimrm> " & ansiResetCode
       var line: string
       try:
-        line = readLineHistory(promptStr, cmdHistory).strip()
+        line = readLineHistory(promptStr, cmdHistory,
+                               proc() = sessionKeepAlive(cur)).strip()
       except EOFError:
         echo ""; break
       if line == "": continue
@@ -1429,7 +1458,8 @@ proc main() =
 
     var line: string
     try:
-      line = readLineHistory(promptStr, cmdHistory).strip()
+      line = readLineHistory(promptStr, cmdHistory,
+                             proc() = sessionKeepAlive(cur)).strip()
     except EOFError:
       echo ""; break
 
@@ -1505,6 +1535,7 @@ proc main() =
           if not output.endsWith("\n"):
             stdout.write("\n")
           stdout.flushFile()
+        cur.lastKeepAliveAt = epochTime()
     except Exception as e:
       styledEcho(fgRed, "\n[!] Error: " & e.msg)
       if isAuthFailure(e) or isConnectionLostMessage(e.msg):
