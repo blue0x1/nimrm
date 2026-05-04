@@ -100,6 +100,9 @@ proc localDownloadPath(remoteArg, localArg: string): string =
 proc remoteDisplayPwd(c: WinRMClient): string =
   if c.remoteCwd != "": c.remoteCwd else: "remote current directory"
 
+proc isAuthFailure(e: ref Exception): bool =
+  result = e of WinRMAuthorizationError
+
 proc resolveRemoteFile(c: var WinRMClient, setup, requested: string): tuple[path: string, size: int] =
   let probe = setup &
     "if(Test-Path -LiteralPath $p -PathType Leaf){" &
@@ -1364,7 +1367,12 @@ proc main() =
     warmSmartShell(client)
     styledEcho(fgGreen, "[*] Shell   : ready")
   except Exception as e:
-    styledEcho(fgYellow, "[!] Shell pre-open failed: " & e.msg)
+    if isAuthFailure(e):
+      styledEcho(fgRed, "[!] Authentication failed: " & e.msg)
+      closeNtlm(client)
+      quit(1)
+    else:
+      styledEcho(fgYellow, "[!] Shell pre-open failed: " & e.msg)
   styledEcho(fgWhite, "Type commands below. 'exit'/'quit' to end. Prefix '!' for CMD.")
   echo ""
 
@@ -1499,7 +1507,7 @@ proc main() =
           stdout.flushFile()
     except Exception as e:
       styledEcho(fgRed, "\n[!] Error: " & e.msg)
-      if isConnectionLostMessage(e.msg):
+      if isAuthFailure(e) or isConnectionLostMessage(e.msg):
         styledEcho(fgYellow, "[*] Session lost: " & cur.name)
         cur.connected = false
         if sessions.len > 1:

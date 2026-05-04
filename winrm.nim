@@ -582,6 +582,26 @@ proc unwrapNtlmToken(tok: string): string =
     return tok[idx..^1]
   result = tok
 
+proc ntlmChallengeFromWwwAuth(wa: string): string =
+  for part in wa.split(','):
+    let p = part.strip()
+    if p.startsWith("NTLM "):
+      let fields = p.splitWhitespace()
+      if fields.len >= 2:
+        return fields[^1]
+    if p.startsWith("Negotiate "):
+      let fields = p.splitWhitespace()
+      if fields.len >= 2:
+        let b64 = fields[^1]
+        try:
+          if NTLM_SIG in decode(b64):
+            return b64
+        except CatchableError:
+          discard
+  raise newException(WinRMAuthorizationError,
+    "Server did not offer an NTLM challenge in WWW-Authenticate: " & wa &
+    " (use -k/--kerb with a valid Kerberos ticket if NTLM is disabled)")
+
 proc rc4(key, data: openArray[byte]): seq[byte] =
   var s: array[256, byte]
   for i in 0..255: s[i] = byte(i)
@@ -1994,14 +2014,7 @@ proc ntlmHandshake(c: var WinRMClient, body: string): RawHttpResponse =
   if wa == "":
     raise newException(WinRMAuthorizationError, "Server did not send WWW-Authenticate (auth not required?)")
 
-  var challB64: string
-  for part in wa.split(','):
-    let p = part.strip()
-    if p.startsWith("NTLM ") or p.startsWith("Negotiate "):
-      challB64 = p.split(' ')[^1]
-      break
-  if challB64 == "":
-    raise newException(WinRMAuthorizationError, "No NTLM challenge token in: " & wa)
+  let challB64 = ntlmChallengeFromWwwAuth(wa)
 
   let challRaw = cast[seq[byte]](unwrapNtlmToken(decode(challB64)))
   let chall    = parseChallenge(challRaw)
@@ -2049,14 +2062,7 @@ proc doNtlm(c: var WinRMClient, body: string): tuple[status, body: string] =
     if wa == "":
       raise newException(WinRMAuthorizationError, "Server did not send WWW-Authenticate (auth not required?)")
 
-    var challB64: string
-    for part in wa.split(','):
-      let p = part.strip()
-      if p.startsWith("NTLM ") or p.startsWith("Negotiate "):
-        challB64 = p.split(' ')[^1]
-        break
-    if challB64 == "":
-      raise newException(WinRMAuthorizationError, "No NTLM challenge token in: " & wa)
+    let challB64 = ntlmChallengeFromWwwAuth(wa)
 
     let challRaw = cast[seq[byte]](unwrapNtlmToken(decode(challB64)))
     let chall    = parseChallenge(challRaw)
