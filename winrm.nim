@@ -2190,6 +2190,7 @@ proc doKerb(c: var WinRMClient, body: string): tuple[status, body: string] =
   result = (r1.status, respBody)
 
 proc resetTransport*(c: var WinRMClient) =
+  let preserveKerbState = c.auth == amKerberos
   if c.hc != nil:
     try: c.hc.close()
     except: discard
@@ -2198,9 +2199,10 @@ proc resetTransport*(c: var WinRMClient) =
     c.hc = nil
   else:
     c.hc = newHttpClient(timeout = 60_000)
-  c.ctx = nil
-  c.authenticated = false
-  c.cmdShellId = ""
+  if not preserveKerbState:
+    c.ctx = nil
+    c.authenticated = false
+    c.cmdShellId = ""
   c.ntlmCliSealRC4 = nil
   c.ntlmSrvSealRC4 = nil
   c.ntlmSeqNum = 0
