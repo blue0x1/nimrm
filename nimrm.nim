@@ -1369,10 +1369,10 @@ proc main() =
   except Exception as e:
     if isAuthFailure(e):
       styledEcho(fgRed, "[!] Authentication failed: " & e.msg)
-      closeNtlm(client)
-      quit(1)
     else:
-      styledEcho(fgYellow, "[!] Shell pre-open failed: " & e.msg)
+      styledEcho(fgRed, "[!] Shell pre-open failed: " & e.msg)
+    closeNtlm(client)
+    quit(1)
   styledEcho(fgWhite, "Type commands below. 'exit'/'quit' to end. Prefix '!' for CMD.")
   echo ""
 
