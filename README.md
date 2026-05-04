@@ -32,6 +32,11 @@
 </p>
 
 ---
+
+```bash
+nimble install nimrm
+```
+
 <img width="1024" height="595" alt="image" src="https://github.com/user-attachments/assets/ee35bbe2-9d5b-4b98-9bf8-78e3286a1219" />
 
 
