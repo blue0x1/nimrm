@@ -2257,6 +2257,49 @@ proc send(c: var WinRMClient, body: string): string =
       raise
   let code = parseInt(status.split(' ')[0])
   if code == 401:
+    if c.authenticated:
+      if getEnv("WINRMSHELL_DEBUG") == "1":
+        styledEcho(fgYellow, "[debug] 401 after established session, resetting transport and retrying once")
+      resetTransport(c)
+      try:
+        (status, respBody) = case c.auth
+          of amNtlm:     doNtlm(c, body)
+          of amKerberos: doKerb(c, body)
+      except CatchableError as e:
+        if isTransportError(e):
+          raise newException(IOError, "Connection lost or target unavailable: " & e.msg)
+        raise
+      let retryCode = parseInt(status.split(' ')[0])
+      if retryCode == 401:
+        raise newException(WinRMAuthorizationError, "Authentication failed (401)")
+      if retryCode in {200, 201, 202}:
+        return respBody
+      if retryCode == 500 and c.auth == amNtlm and
+         not c.ntlmEncrypt and not c.useSSL and c.msgEnc != meNever:
+        if getEnv("WINRMSHELL_DEBUG") == "1":
+          styledEcho(fgYellow, "[debug] NTLM: server requires message encryption, retrying with NTLM sealing")
+        c.ntlmEncrypt = true
+        closeNtlm(c)
+        try:
+          (status, respBody) = doNtlm(c, body)
+        except CatchableError as e:
+          if isTransportError(e):
+            raise newException(IOError, "Connection lost: " & e.msg)
+          raise
+        let code2 = parseInt(status.split(' ')[0])
+        if code2 in {200, 201, 202}:
+          result = respBody
+          return
+        if code2 == 500 and ("<s:Envelope" in respBody or "<env:Envelope" in respBody or "<Envelope" in respBody):
+          result = respBody
+          return
+        let preview2 = if respBody.len > 0: respBody[0..min(400, respBody.len-1)] else: "(empty body)"
+        raise newWinRMHTTPTransportError(fmt"WinRM error {code2}: " & preview2, code2)
+      if retryCode == 500 and ("<s:Envelope" in respBody or "<env:Envelope" in respBody or "<Envelope" in respBody):
+        result = respBody
+        return
+      let previewRetry = if respBody.len > 0: respBody[0..min(400, respBody.len-1)] else: "(empty body)"
+      raise newWinRMHTTPTransportError(fmt"WinRM error {retryCode}: " & previewRetry, retryCode)
     raise newException(WinRMAuthorizationError, "Authentication failed (401)")
   if code notin {200, 201, 202}:
     if code == 500 and c.auth == amNtlm and
