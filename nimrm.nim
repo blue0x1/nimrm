@@ -987,7 +987,7 @@ proc readLineHistory*(prompt: string; history: var seq[string];
       stdout.flushFile()
 
     while true:
-      if poll(addr pfd, Tnfds(1), tickMs) <= 0:
+      if poll(addr pfd, Tnfds(1), tickMs.cint) <= 0:
         if onTick != nil:
           onTick()
         continue
