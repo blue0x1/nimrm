@@ -2040,7 +2040,7 @@ proc ntlmHandshake(c: var WinRMClient, body: string): RawHttpResponse =
       except CatchableError as e:
         if getEnv("WINRMSHELL_DEBUG") == "1":
           styledEcho(fgYellow, "[debug] NTLM unwrap response failed: " & e.msg)
-    c.ntlmReady = code3 in {200, 201, 202, 500}
+    c.ntlmReady = code3 == 200 or code3 == 201 or code3 == 202 or code3 == 500
     return
 
   result = rawNtlmPost(c, body, "Negotiate " & encode(spnegoResp(auth)), c.ntlmSock)
@@ -2049,7 +2049,7 @@ proc ntlmHandshake(c: var WinRMClient, body: string): RawHttpResponse =
     let conn2 = rawHeaderVal(result, "connection")
     if conn2 != "": styledEcho(fgYellow, "[debug] NTLM type3 Connection: " & conn2)
   let code = parseInt(result.status.splitWhitespace()[0])
-  c.ntlmReady = code in {200, 201, 202, 500}
+  c.ntlmReady = code == 200 or code == 201 or code == 202 or code == 500
 
 proc doNtlm(c: var WinRMClient, body: string): tuple[status, body: string] =
   if c.useSSL:
