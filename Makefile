@@ -6,7 +6,7 @@ VERSION = 1.0.0
 DEB     = $(BIN)_$(VERSION)_amd64.deb
 DEBDIR  = build/deb/$(BIN)
 NIMC    = nim
-FLAGS   = -d:release -d:ssl --opt:speed
+FLAGS   = -d:release -d:ssl --threads:on --opt:speed
 MINGW64 = x86_64-w64-mingw32-gcc
 
 .PHONY: all linux windows ssl deb clean

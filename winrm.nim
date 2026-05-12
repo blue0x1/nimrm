@@ -1334,6 +1334,7 @@ proc soapCreate(host: string, port: int, ssl: bool, sessionId, runspaceId: strin
 </env:Header>
 <env:Body>
   <rsp:Shell ShellId="{runspaceId}" Name="Runspace">
+    <rsp:IdleTimeOut>PT7200.000S</rsp:IdleTimeOut>
     <rsp:InputStreams>stdin pr</rsp:InputStreams>
     <rsp:OutputStreams>stdout</rsp:OutputStreams>
     <creationXml xmlns="http://schemas.microsoft.com/powershell">{creationXml}</creationXml>
@@ -1507,6 +1508,7 @@ proc soapCreateCmd(host: string, port: int, ssl: bool, sessionId: string): strin
 </env:Header>
 <env:Body>
   <rsp:Shell>
+    <rsp:IdleTimeOut>PT7200.000S</rsp:IdleTimeOut>
     <rsp:InputStreams>stdin</rsp:InputStreams>
     <rsp:OutputStreams>stdout stderr</rsp:OutputStreams>
   </rsp:Shell>
@@ -1997,6 +1999,21 @@ proc closeNtlm*(c: var WinRMClient) =
   c.ntlmSock = nil
   c.ntlmReady = false
 
+proc resetHttpConnection(c: var WinRMClient) =
+  if c.hc != nil:
+    try: c.hc.close()
+    except: discard
+  closeNtlm(c)
+  if c.auth == amNtlm and not c.useSSL:
+    c.hc = nil
+  else:
+    c.hc = newHttpClient(timeout = 60_000)
+  c.ctx = nil
+  c.authenticated = false
+  c.ntlmCliSealRC4 = nil
+  c.ntlmSrvSealRC4 = nil
+  c.ntlmSeqNum = 0
+
 proc ntlmHandshake(c: var WinRMClient, body: string): RawHttpResponse =
   closeNtlm(c)
   c.ntlmSock = connectWinrmSocket(c)
@@ -2190,23 +2207,11 @@ proc doKerb(c: var WinRMClient, body: string): tuple[status, body: string] =
   result = (r1.status, respBody)
 
 proc resetTransport*(c: var WinRMClient) =
-  if c.hc != nil:
-    try: c.hc.close()
-    except: discard
-  closeNtlm(c)
-  if c.auth == amNtlm and not c.useSSL:
-    c.hc = nil
-  else:
-    c.hc = newHttpClient(timeout = 60_000)
-  c.ctx = nil
-  c.authenticated = false
+  resetHttpConnection(c)
   c.shellId = ""
   c.runspaceId = ""
   c.cmdShellId = ""
   c.pendingCleanupCmdId = ""
-  c.ntlmCliSealRC4 = nil
-  c.ntlmSrvSealRC4 = nil
-  c.ntlmSeqNum = 0
 
 proc isRetryableSessionLoss(c: WinRMClient, e: ref Exception): bool =
   if not (c.authenticated or c.shellId != "" or c.cmdShellId != "" or c.ctx != nil):
@@ -2262,7 +2267,7 @@ proc send(c: var WinRMClient, body: string): string =
       raise
     if getEnv("WINRMSHELL_DEBUG") == "1":
       styledEcho(fgYellow, "[debug] transport reset, reopening HTTP/Kerberos session and retrying request: " & e.msg)
-    resetTransport(c)
+    resetHttpConnection(c)
     try:
       (status, respBody) = case c.auth
         of amNtlm:     doNtlm(c, body)
@@ -2276,7 +2281,7 @@ proc send(c: var WinRMClient, body: string): string =
     if c.authenticated:
       if getEnv("WINRMSHELL_DEBUG") == "1":
         styledEcho(fgYellow, "[debug] 401 after established session, resetting transport and retrying once")
-      resetTransport(c)
+      resetHttpConnection(c)
       try:
         (status, respBody) = case c.auth
           of amNtlm:     doNtlm(c, body)
@@ -2897,8 +2902,18 @@ proc runCmdFastCached*(c: var WinRMClient, cmd: string, isCmd: bool,
         return runCmdCollect(c, cmd, isCmd, onChunk, true)
       raise
 
-proc warmSmartShell*(c: var WinRMClient) =
-  let interactiveStatus = getEnv("WINRMSHELL_STATUS") != "0"
+proc keepAliveSmart*(c: var WinRMClient): bool =
+  if c.cmdShellDenied or c.shellId != "":
+    if c.shellId == "":
+      ensureShell(c, false)
+    return keepAliveShell(c)
+  if c.cmdShellId != "":
+    discard runCmdOnShell(c, c.cmdShellId, "rem nimrm keepalive", true)
+    return true
+  result = false
+
+proc warmSmartShell*(c: var WinRMClient, showStatus = true) =
+  let interactiveStatus = showStatus and getEnv("WINRMSHELL_STATUS") != "0"
   if c.cmdShellDenied:
     ensureShell(c)
     return

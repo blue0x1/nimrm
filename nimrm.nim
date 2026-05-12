@@ -19,7 +19,7 @@
 
 import std/[
   strutils, strformat, base64, os,
-  parseopt, terminal, times, random
+  parseopt, terminal, times, random, locks
 ]
 
 import winrm
@@ -34,6 +34,7 @@ type
     authStr: string
     connected: bool
     lastKeepAliveAt: float
+    lock: Lock
 
 const
   DownloadChunkSize = 524288
@@ -43,6 +44,7 @@ const
   PsrpUploadChunkSize = PsrpDownloadChunkSize
   PsrpDownloadLineChars = 4096
   InMemoryB64ChunkSize = 196608
+  KeepAliveIntervalSec = 30.0
 
 proc psQuote(s: string): string =
   "'" & s.replace("'", "''") & "'"
@@ -104,23 +106,21 @@ proc remoteDisplayPwd(c: WinRMClient): string =
 proc isAuthFailure(e: ref Exception): bool =
   result = e of WinRMAuthorizationError
 
-proc sessionKeepAlive(s: Session) =
+proc keepAliveLocked(s: Session) =
   if s == nil or not s.connected:
     return
-  if s.client.shellId == "":
-    return
-  if epochTime() - s.lastKeepAliveAt < 45.0:
+  if epochTime() - s.lastKeepAliveAt < KeepAliveIntervalSec:
     return
   try:
-    discard keepAliveShell(s.client)
+    discard keepAliveSmart(s.client)
     s.lastKeepAliveAt = epochTime()
   except CatchableError:
     try:
       resetTransport(s.client)
-      ensureShell(s.client)
+      warmSmartShell(s.client, false)
       s.lastKeepAliveAt = epochTime()
     except CatchableError:
-      discard
+      s.connected = false
 
 proc resolveRemoteFile(c: var WinRMClient, setup, requested: string): tuple[path: string, size: int] =
   let probe = setup &
@@ -1060,9 +1060,58 @@ proc readLineHistory*(prompt: string; history: var seq[string];
 
 var sessions: seq[Session] = @[]
 var activeIdx = -1
+var sessionsLock: Lock
+var maintenanceStop {.volatile.} = false
+var maintenanceThread: Thread[void]
+var maintenanceStarted = false
+
+template withSessionLock(s: Session, body: untyped): untyped =
+  acquire(s.lock)
+  try:
+    body
+  finally:
+    release(s.lock)
+
+proc maintenanceLoop() {.thread.} =
+  while not maintenanceStop:
+    sleep(1000)
+    var snapshot: seq[Session]
+    acquire(sessionsLock)
+    try:
+      {.cast(gcsafe).}:
+        snapshot = sessions
+    finally:
+      release(sessionsLock)
+    for s in snapshot:
+      if s == nil:
+        continue
+      if tryAcquire(s.lock):
+        try:
+          {.cast(gcsafe).}:
+            keepAliveLocked(s)
+        finally:
+          release(s.lock)
+
+proc startMaintenance() =
+  if maintenanceStarted:
+    return
+  maintenanceStop = false
+  createThread(maintenanceThread, maintenanceLoop)
+  maintenanceStarted = true
+
+proc stopMaintenance() =
+  if not maintenanceStarted:
+    return
+  maintenanceStop = true
+  joinThread(maintenanceThread)
+  maintenanceStarted = false
 
 proc activeSession(): Session =
-  if activeIdx >= 0 and activeIdx < sessions.len: sessions[activeIdx] else: nil
+  acquire(sessionsLock)
+  try:
+    if activeIdx >= 0 and activeIdx < sessions.len: sessions[activeIdx] else: nil
+  finally:
+    release(sessionsLock)
 
 proc findSession(name: string): int =
   for i, s in sessions:
@@ -1075,47 +1124,63 @@ proc findSession(name: string): int =
   return -1
 
 proc listSessions() =
-  if sessions.len == 0:
-    styledEcho(fgYellow, "[*] No active sessions")
-    return
-  echo ""
-  styledEcho(fgWhite, "  ID  Name              Target                    User              Auth")
-  styledEcho(fgWhite, "  --  ----              ------                    ----              ----")
-  for i, s in sessions:
-    let marker = if i == activeIdx: " *" else: "  "
-    let id = align($(i + 1), 2)
-    let name = alignLeft(s.name, 16)
-    let target = alignLeft(s.host, 24)
-    let user = alignLeft(if s.user != "": s.user else: "(kerberos)", 16)
-    let color = if i == activeIdx: fgGreen else: fgWhite
-    styledEcho(color, marker & id & "  " & name & "  " & target & "  " & user & "  " & s.authStr)
-  echo ""
-
+  acquire(sessionsLock)
+  try:
+    if sessions.len == 0:
+      styledEcho(fgYellow, "[*] No active sessions")
+      return
+    echo ""
+    styledEcho(fgWhite, "  ID  Name              Target                    User              Auth")
+    styledEcho(fgWhite, "  --  ----              ------                    ----              ----")
+    for i, s in sessions:
+      let marker = if i == activeIdx: " *" else: "  "
+      let id = align($(i + 1), 2)
+      let name = alignLeft(s.name, 16)
+      let target = alignLeft(s.host, 24)
+      let user = alignLeft(if s.user != "": s.user else: "(kerberos)", 16)
+      let color = if i == activeIdx: fgGreen else: fgWhite
+      styledEcho(color, marker & id & "  " & name & "  " & target & "  " & user & "  " & s.authStr)
+    echo ""
+  finally:
+    release(sessionsLock)
 proc killSession(name: string) =
+  acquire(sessionsLock)
   let idx = findSession(name)
   if idx < 0:
+    release(sessionsLock)
     styledEcho(fgRed, "[!] Session not found: " & name)
     return
   let s = sessions[idx]
-  try:
-    deleteShell(s.client)
-    closeNtlm(s.client)
-  except:
-    discard
+  release(sessionsLock)
+  withSessionLock(s):
+    try:
+      deleteShell(s.client)
+      closeNtlm(s.client)
+    except:
+      discard
   styledEcho(fgYellow, "[*] Killed session: " & s.name)
-  sessions.delete(idx)
-  if activeIdx == idx:
-    activeIdx = if sessions.len > 0: 0 else: -1
-  elif activeIdx > idx:
-    dec activeIdx
+  acquire(sessionsLock)
+  try:
+    let deleteIdx = findSession(s.name)
+    if deleteIdx >= 0:
+      sessions.delete(deleteIdx)
+      if activeIdx == deleteIdx:
+        activeIdx = if sessions.len > 0: 0 else: -1
+      elif activeIdx > deleteIdx:
+        dec activeIdx
+  finally:
+    release(sessionsLock)
 
 proc switchSession(name: string) =
+  acquire(sessionsLock)
   let idx = findSession(name)
   if idx < 0:
+    release(sessionsLock)
     styledEcho(fgRed, "[!] Session not found: " & name)
     return
   activeIdx = idx
   let s = sessions[idx]
+  release(sessionsLock)
   styledEcho(fgGreen, "[*] Switched to session: " & s.name & " (" & s.host & ")")
 
 proc createNewSession(args: seq[string]) =
@@ -1194,19 +1259,31 @@ proc createNewSession(args: seq[string]) =
   let authMethod = if useKerb: amKerberos else: amNtlm
 
   if sessionName == "":
-    var n = sessions.len + 1
-    while true:
-      sessionName = "session-" & $n
-      var exists = false
-      for s in sessions:
-        if s.name == sessionName: exists = true; break
-      if not exists: break
-      inc n
+    acquire(sessionsLock)
+    try:
+      var n = sessions.len + 1
+      while true:
+        sessionName = "session-" & $n
+        var exists = false
+        for s in sessions:
+          if s.name == sessionName: exists = true; break
+        if not exists: break
+        inc n
+    finally:
+      release(sessionsLock)
 
-  for s in sessions:
-    if s.name == sessionName:
-      styledEcho(fgRed, "[!] Session name already exists: " & sessionName)
-      return
+  acquire(sessionsLock)
+  var nameExists = false
+  try:
+    for s in sessions:
+      if s.name == sessionName:
+        nameExists = true
+        break
+  finally:
+    release(sessionsLock)
+  if nameExists:
+    styledEcho(fgRed, "[!] Session name already exists: " & sessionName)
+    return
 
   styledEcho(fgWhite, "[*] Connecting to " & host & ":" & $port & " ...")
   var client = newClient(host, user, password, ntHash, spn, domain, authMethod, useSSL, port)
@@ -1236,17 +1313,21 @@ proc createNewSession(args: seq[string]) =
     authStr: authStr,
     connected: true,
     lastKeepAliveAt: epochTime())
+  initLock(s.lock)
+  acquire(sessionsLock)
   sessions.add(s)
   activeIdx = sessions.len - 1
+  release(sessionsLock)
   styledEcho(fgGreen, "[+] Session created: " & sessionName & " (" & host & ":" & $port & ")")
 
 when defined(posix):
   var sigintFlag {.volatile.} = false
   proc sigintHandler(sig: cint) {.noconv.} = sigintFlag = true
-  discard posix.signal(SIGINT, sigintHandler)
+  posix.signal(SIGINT, sigintHandler)
 
 proc main() =
   randomize()
+  initLock(sessionsLock)
 
   var host, username, password, ntHash, realm, spn, execCommand: string
   var customPort = 0
@@ -1445,8 +1526,12 @@ proc main() =
     authStr: authStr,
     connected: true,
     lastKeepAliveAt: epochTime())
+  initLock(initSession.lock)
+  acquire(sessionsLock)
   sessions.add(initSession)
   activeIdx = 0
+  release(sessionsLock)
+  startMaintenance()
 
   var cmdHistory: seq[string] = @[]
   while true:
@@ -1508,52 +1593,61 @@ proc main() =
       elif verb == "kill" and words.len >= 2:
         killSession(words[1])
       elif verb == "upload":
-        uploadFile(cur.client, words[1..^1])
+        withSessionLock(cur):
+          uploadFile(cur.client, words[1..^1])
       elif verb == "download":
-        downloadFile(cur.client, words[1..^1])
+        withSessionLock(cur):
+          downloadFile(cur.client, words[1..^1])
       elif verb == "upload-dir":
-        uploadDir(cur.client, words[1..^1])
+        withSessionLock(cur):
+          uploadDir(cur.client, words[1..^1])
       elif verb == "download-dir":
-        downloadDir(cur.client, words[1..^1])
+        withSessionLock(cur):
+          downloadDir(cur.client, words[1..^1])
       elif verb == "invoke-script":
-        invokeScript(cur.client, words[1..^1])
+        withSessionLock(cur):
+          invokeScript(cur.client, words[1..^1])
       elif verb == "ad-info":
-        adInfo(cur.client)
+        withSessionLock(cur):
+          adInfo(cur.client)
       elif verb == "opsec-check":
-        opsecCheck(cur.client)
+        withSessionLock(cur):
+          opsecCheck(cur.client)
       elif verb in ["execute-assembly", "exec-assembly"]:
-        executeAssembly(cur.client, words[1..^1])
+        withSessionLock(cur):
+          executeAssembly(cur.client, words[1..^1])
       else:
         let isCmd = line.startsWith("!")
         let cmd = if isCmd: line[1..^1].strip() else: line
         let isDirChange = verb in ["cd", "set-location", "sl", "chdir",
                                    "pushd", "push-location", "popd", "pop-location"]
         var output: string
-        if isDirChange and not isCmd:
-          let prefix = if cur.currentPath != "": "Set-Location " & psQuote(cur.currentPath) & "; "
-                       else: "Set-Location $env:USERPROFILE; "
-          let target = if words.len >= 2: words[1] else: ""
-          let fallback = if target != "" and not target.contains(":") and not target.startsWith("\\") and not target.startsWith("/") and target notin [".", ".."]:
-            "try{Set-Location (Join-Path $env:USERPROFILE " & psQuote(target) & ")}catch{Write-Error $__nimrm_cd_err.Exception.Message};"
-          else:
-            "Write-Error $__nimrm_cd_err.Exception.Message;"
-          let raw = runCmdFastCached(cur.client,
-            prefix & "$ErrorActionPreference='Stop';try{" & cmd & "}catch{$__nimrm_cd_err = $_;" & fallback & "};" &
-            "Write-Output \"##CD##$((Get-Location).Path)\"", false)
-          var outLines: seq[string]
-          for ln in raw.splitLines():
-            if ln.startsWith("##CD##"):
-              cur.currentPath = ln[6..^1].strip()
-              cur.client.remoteCwd = cur.currentPath
+        withSessionLock(cur):
+          if isDirChange and not isCmd:
+            let prefix = if cur.currentPath != "": "Set-Location " & psQuote(cur.currentPath) & "; "
+                         else: "Set-Location $env:USERPROFILE; "
+            let target = if words.len >= 2: words[1] else: ""
+            let fallback = if target != "" and not target.contains(":") and not target.startsWith("\\") and not target.startsWith("/") and target notin [".", ".."]:
+              "try{Set-Location (Join-Path $env:USERPROFILE " & psQuote(target) & ")}catch{Write-Error $__nimrm_cd_err.Exception.Message};"
             else:
-              outLines.add(ln)
-          while outLines.len > 0 and outLines[^1].strip() == "":
-            outLines.setLen(outLines.len - 1)
-          output = if outLines.len > 0: outLines.join("\n") & "\n" else: ""
-        elif not isCmd and cur.currentPath != "":
-          output = runCmdFastCached(cur.client, "Set-Location " & psQuote(cur.currentPath) & "; " & cmd, false)
-        else:
-          output = runCmdFastCached(cur.client, cmd, isCmd)
+              "Write-Error $__nimrm_cd_err.Exception.Message;"
+            let raw = runCmdFastCached(cur.client,
+              prefix & "$ErrorActionPreference='Stop';try{" & cmd & "}catch{$__nimrm_cd_err = $_;" & fallback & "};" &
+              "Write-Output \"##CD##$((Get-Location).Path)\"", false)
+            var outLines: seq[string]
+            for ln in raw.splitLines():
+              if ln.startsWith("##CD##"):
+                cur.currentPath = ln[6..^1].strip()
+                cur.client.remoteCwd = cur.currentPath
+              else:
+                outLines.add(ln)
+            while outLines.len > 0 and outLines[^1].strip() == "":
+              outLines.setLen(outLines.len - 1)
+            output = if outLines.len > 0: outLines.join("\n") & "\n" else: ""
+          elif not isCmd and cur.currentPath != "":
+            output = runCmdFastCached(cur.client, "Set-Location " & psQuote(cur.currentPath) & "; " & cmd, false)
+          else:
+            output = runCmdFastCached(cur.client, cmd, isCmd)
         if output.len > 0:
           stdout.write(output)
           if not output.endsWith("\n"):
@@ -1580,6 +1674,7 @@ proc main() =
           else:
             break
 
+  stopMaintenance()
   for s in sessions:
     try:
       styledEcho(fgYellow, "[*] Closing session: " & s.name)
