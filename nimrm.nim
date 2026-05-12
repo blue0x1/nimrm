@@ -109,7 +109,7 @@ proc sessionKeepAlive(s: Session) =
     return
   if s.client.shellId == "":
     return
-  if epochTime() - s.lastKeepAliveAt < 5.0:
+  if epochTime() - s.lastKeepAliveAt < 45.0:
     return
   try:
     discard keepAliveShell(s.client)
@@ -947,13 +947,29 @@ when defined(posix):
   const TCSANOW_C = 0.cint
   const F_ICANON  = 0x00000002.cuint
   const F_ECHO    = 0x00000008.cuint
+  const F_ISIG    = 0x00000001.cuint
   const VMIN_I    = 6
   const VTIME_I   = 5
 
   proc rawRead(): char =
     var ch: char
-    discard posix.read(STDIN_FILENO, addr ch, 1)
+    while true:
+      let n = posix.read(STDIN_FILENO, addr ch, 1)
+      if n >= 0: break
+      if errno != EINTR: break
     ch
+
+  proc rawReadTimeout(ms: int): (bool, char) =
+    var pfd2: TPollfd
+    pfd2.fd = STDIN_FILENO.cint
+    pfd2.events = POLLIN.cshort
+    if poll(addr pfd2, Tnfds(1), ms.cint) <= 0: return (false, '\x00')
+    var ch: char
+    while true:
+      let n = posix.read(STDIN_FILENO, addr ch, 1)
+      if n >= 0: break
+      if errno != EINTR: break
+    (true, ch)
 
 proc readLineHistory*(prompt: string; history: var seq[string];
                       onTick: proc() = nil; tickMs = 1000): string =
@@ -964,7 +980,7 @@ proc readLineHistory*(prompt: string; history: var seq[string];
     var orig: Termios
     discard tcgetattr(STDIN_FILENO, addr orig)
     var raw = orig
-    raw.c_lflag = raw.c_lflag and not (F_ICANON or F_ECHO)
+    raw.c_lflag = raw.c_lflag and not (F_ICANON or F_ECHO or F_ISIG)
     raw.c_cc[VMIN_I]  = '\x01'
     raw.c_cc[VTIME_I] = '\x00'
     discard tcsetattr(STDIN_FILENO, TCSANOW_C, addr raw)
@@ -987,10 +1003,13 @@ proc readLineHistory*(prompt: string; history: var seq[string];
       stdout.flushFile()
 
     while true:
-      if poll(addr pfd, Tnfds(1), tickMs.cint) <= 0:
+      let pollRet = poll(addr pfd, Tnfds(1), tickMs.cint)
+      if pollRet <= 0 or (pfd.revents and POLLIN.cshort) == 0:
+        pfd.revents = 0
         if onTick != nil:
           onTick()
         continue
+      pfd.revents = 0
       let c = rawRead()
       case c
       of '\r', '\n':
@@ -1002,33 +1021,33 @@ proc readLineHistory*(prompt: string; history: var seq[string];
           dec cursor
           redraw()
       of '\x1b':
-        let c2 = rawRead()
-        if c2 == '[':
-          let c3 = rawRead()
-          case c3
-          of 'A':
-            if histIdx == history.len: saved = buf
-            if histIdx > 0:
-              dec histIdx
-              buf = history[histIdx]
-              cursor = buf.len
-              redraw()
-          of 'B':
-            if histIdx < history.len:
-              inc histIdx
-              buf = if histIdx == history.len: saved else: history[histIdx]
-              cursor = buf.len
-              redraw()
-          of 'C':
-            if cursor < buf.len:
-              inc cursor
-              stdout.write("\x1b[C"); stdout.flushFile()
-          of 'D':
-            if cursor > 0:
-              dec cursor
-              stdout.write("\x1b[D"); stdout.flushFile()
-          else: discard
-        else: discard
+        let (got2, c2) = rawReadTimeout(50)
+        if got2 and c2 == '[':
+          let (got3, c3) = rawReadTimeout(50)
+          if got3:
+            case c3
+            of 'A':
+              if histIdx == history.len: saved = buf
+              if histIdx > 0:
+                dec histIdx
+                buf = history[histIdx]
+                cursor = buf.len
+                redraw()
+            of 'B':
+              if histIdx < history.len:
+                inc histIdx
+                buf = if histIdx == history.len: saved else: history[histIdx]
+                cursor = buf.len
+                redraw()
+            of 'C':
+              if cursor < buf.len:
+                inc cursor
+                stdout.write("\x1b[C"); stdout.flushFile()
+            of 'D':
+              if cursor > 0:
+                dec cursor
+                stdout.write("\x1b[D"); stdout.flushFile()
+            else: discard
       of '\x03':
         stdout.write("\n"); stdout.flushFile()
         result = ""; break
@@ -1220,6 +1239,11 @@ proc createNewSession(args: seq[string]) =
   sessions.add(s)
   activeIdx = sessions.len - 1
   styledEcho(fgGreen, "[+] Session created: " & sessionName & " (" & host & ":" & $port & ")")
+
+when defined(posix):
+  var sigintFlag {.volatile.} = false
+  proc sigintHandler(sig: cint) {.noconv.} = sigintFlag = true
+  discard posix.signal(SIGINT, sigintHandler)
 
 proc main() =
   randomize()
@@ -1419,7 +1443,8 @@ proc main() =
     host: host & ":" & $port,
     user: user,
     authStr: authStr,
-    connected: true)
+    connected: true,
+    lastKeepAliveAt: epochTime())
   sessions.add(initSession)
   activeIdx = 0
 
@@ -1431,8 +1456,7 @@ proc main() =
       let promptStr = ansiForegroundColorCode(fgRed) & "nimrm> " & ansiResetCode
       var line: string
       try:
-        line = readLineHistory(promptStr, cmdHistory,
-                               proc() = sessionKeepAlive(cur)).strip()
+        line = readLineHistory(promptStr, cmdHistory).strip()
       except EOFError:
         echo ""; break
       if line == "": continue
@@ -1456,10 +1480,10 @@ proc main() =
       (if cur.currentPath != "": "PS " & cur.currentPath & "> " else: "PS> ") &
       ansiResetCode
 
+    cur.lastKeepAliveAt = epochTime()
     var line: string
     try:
-      line = readLineHistory(promptStr, cmdHistory,
-                             proc() = sessionKeepAlive(cur)).strip()
+      line = readLineHistory(promptStr, cmdHistory).strip()
     except EOFError:
       echo ""; break
 
@@ -1535,17 +1559,26 @@ proc main() =
           if not output.endsWith("\n"):
             stdout.write("\n")
           stdout.flushFile()
-        cur.lastKeepAliveAt = epochTime()
+      cur.lastKeepAliveAt = epochTime()
     except Exception as e:
-      styledEcho(fgRed, "\n[!] Error: " & e.msg)
-      if isAuthFailure(e) or isConnectionLostMessage(e.msg):
-        styledEcho(fgYellow, "[*] Session lost: " & cur.name)
+      let emsg = e.msg
+      if "SIGINT" in emsg or "Interrupted" in emsg: continue
+      styledEcho(fgRed, "\n[!] Error: " & emsg)
+      if isAuthFailure(e) or isConnectionLostMessage(emsg):
+        styledEcho(fgYellow, "[*] Session lost — reconnecting...")
         cur.connected = false
-        if sessions.len > 1:
-          killSession(cur.name)
-          continue
-        else:
-          break
+        try:
+          resetTransport(cur.client)
+          warmSmartShell(cur.client)
+          cur.connected = true
+          cur.lastKeepAliveAt = epochTime()
+          styledEcho(fgGreen, "[*] Reconnected.")
+        except Exception as re:
+          styledEcho(fgRed, "[!] Reconnect failed: " & re.msg)
+          if sessions.len > 1:
+            killSession(cur.name)
+          else:
+            break
 
   for s in sessions:
     try:
