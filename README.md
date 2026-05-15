@@ -66,7 +66,7 @@
 | Authentication | NTLM password, NTLM hash, Kerberos via `KRB5CCNAME` |
 | WinRM transport | HTTP, HTTPS/TLS, custom port |
 | Shell | Interactive PowerShell, CMD prefix, one-shot command mode |
-| Transfers | File upload/download, recursive directory transfer |
+| Transfers | File upload/download, recursive directory transfer, remote session-to-session file relay |
 | In-memory | PowerShell script import, managed .NET assembly execution |
 | Reporting | AD/domain context, logging and auditing posture |
 | Reliability | Kerberos message wrapping, transport reset/retry handling |
@@ -144,6 +144,7 @@ nim c -d:release --opt:speed -o:nimrm nimrm.nim
 | --- | --- |
 | Upload | Chunked Base64 writes with adaptive retry on large envelopes |
 | Download | Streamed Base64 chunks with progress tracking |
+| Remote session relay | Reads from one WinRM session and writes to another through controller memory without writing the file to local disk |
 | Directory transfer | Recursive file enumeration using the same chunked transfer path |
 | Command execution | Reuses the active WinRM shell/runspace instead of reconnecting per command |
 
@@ -263,6 +264,22 @@ Close a session:
 [*] Killed session: session-2
 ```
 
+Copy files between active sessions:
+
+```powershell
+[session-1] PS C:\Users\katana> rupload C:\Users\katana\tool.exe session-2 C:\Users\parrot\Desktop\tool.exe
+[*] Download mode: WinRS binary stream
+✔  rupload-read  [━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━]  100%  442.0 KB/442.0 KB  done in 0.7s
+[*] Upload mode: WinRS stream
+✔  rupload-write  [━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━]  100%  442.0 KB/442.0 KB  done in 0.4s
+[+] Remote uploaded 452608 bytes from session-1:C:\Users\katana\tool.exe to session-2:C:\Users\parrot\Desktop\tool.exe
+
+[session-1] PS C:\Users\katana> rdownload session-2 C:\Users\parrot\Desktop\out.txt C:\Users\katana\out.txt
+[+] Remote downloaded 1024 bytes from session-2:C:\Users\parrot\Desktop\out.txt to session-1:C:\Users\katana\out.txt
+```
+
+`rupload` uses the active session as the source and the named session as the destination. `rdownload` uses the named session as the source and the active session as the destination. Both commands relay bytes through `nimrm` memory, so the controller host does not write a temporary copy to disk.
+
 Session options:
 
 | Option | Description |
@@ -299,6 +316,16 @@ PS> upload-dir ./payloads C:\Temp\payloads
 PS> download-dir C:\Temp\logs ./logs
 ```
 
+Remote session relay direction:
+
+```powershell
+# Active session -> another session
+PS> rupload C:\Temp\payload.exe session-2 C:\Users\Public\payload.exe
+
+# Another session -> active session
+PS> rdownload session-2 C:\Users\Public\loot.zip C:\Temp\loot.zip
+```
+
 In-memory helpers:
 
 ```powershell
@@ -317,6 +344,7 @@ PS> opsec-check
 
 - `execute-assembly` supports managed .NET assemblies only.
 - `invoke-script` imports into the current remote runspace.
+- `rupload` and `rdownload` do not write temporary files on the controller host, but the bytes still pass through controller memory and use two WinRM transfer legs.
 - `ad-info` and `opsec-check` are read-only reporting commands.
 - Some reporting data requires sufficient remote privileges.
 
