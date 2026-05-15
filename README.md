@@ -11,7 +11,7 @@
 
 <p align="center">
   <sub>
-    <b>Version</b> 1.0.0 ·
+    <b>Version</b> 1.1.0 ·
     <b>Author</b> Chokri Hammedi (blue0x1) ·
     <b>License</b> MIT
   </sub>
@@ -104,8 +104,8 @@ Invoke-WebRequest -Uri https://github.com/blue0x1/nimrm/releases/latest/download
 Debian package:
 
 ```bash
-curl -L -o nimrm_1.0.0_amd64.deb https://github.com/blue0x1/nimrm/releases/latest/download/nimrm_1.0.0_amd64.deb
-sudo dpkg -i nimrm_1.0.0_amd64.deb
+curl -L -o nimrm_1.1.0_amd64.deb https://github.com/blue0x1/nimrm/releases/latest/download/nimrm_1.1.0_amd64.deb
+sudo dpkg -i nimrm_1.1.0_amd64.deb
 ```
 
 Build from source:

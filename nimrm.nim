@@ -1,7 +1,7 @@
 ## nimrm.nim
 ## Interactive WinRM Shell Client for Nim
 ## Author: Chokri Hammedi (blue0x1)
-## Version: 1.0.0
+## Version: 1.1.0
 ## Compile: nim c -d:release -d:ssl nimrm.nim
 ##
 ## Legal notice:
