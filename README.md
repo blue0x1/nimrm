@@ -267,15 +267,15 @@ Close a session:
 Copy files between active sessions:
 
 ```powershell
-[session-1] PS C:\Users\katana> rupload C:\Users\katana\tool.exe session-2 C:\Users\parrot\Desktop\tool.exe
+[session-1] PS C:\Users\user1> rupload C:\Users\user1\tool.exe session-2 C:\Users\user2\Desktop\tool.exe
 [*] Download mode: WinRS binary stream
 ✔  rupload-read  [━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━]  100%  442.0 KB/442.0 KB  done in 0.7s
 [*] Upload mode: WinRS stream
 ✔  rupload-write  [━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━]  100%  442.0 KB/442.0 KB  done in 0.4s
-[+] Remote uploaded 452608 bytes from session-1:C:\Users\katana\tool.exe to session-2:C:\Users\parrot\Desktop\tool.exe
+[+] Remote uploaded 452608 bytes from session-1:C:\Users\user1\tool.exe to session-2:C:\Users\user2\Desktop\tool.exe
 
-[session-1] PS C:\Users\katana> rdownload session-2 C:\Users\parrot\Desktop\out.txt C:\Users\katana\out.txt
-[+] Remote downloaded 1024 bytes from session-2:C:\Users\parrot\Desktop\out.txt to session-1:C:\Users\katana\out.txt
+[session-1] PS C:\Users\user1> rdownload session-2 C:\Users\user2\Desktop\out.txt C:\Users\user1\out.txt
+[+] Remote downloaded 1024 bytes from session-2:C:\Users\user2\Desktop\out.txt to session-1:C:\Users\user1\out.txt
 ```
 
 `rupload` uses the active session as the source and the named session as the destination. `rdownload` uses the named session as the source and the active session as the destination. Both commands relay bytes through `nimrm` memory, so the controller host does not write a temporary copy to disk.
