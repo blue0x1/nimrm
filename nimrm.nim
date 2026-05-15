@@ -256,23 +256,14 @@ proc statusLine(color: ForegroundColor, msg: string) =
   stdout.flushFile()
   styledEcho(color, msg)
 
-proc uploadFile(c: var WinRMClient, args: seq[string]) =
-  if args.len < 1 or args.len > 2:
-    raise newException(ValueError, "usage: upload <local-file> [remote-file-or-dir]")
-  let localPath = if isAbsolute(args[0]): args[0] else: getCurrentDir() / args[0]
-  if not fileExists(localPath):
-    raise newException(IOError, "local file not found: " & args[0] & " in " & getCurrentDir() & " (" & localPath & ")")
-
-  let fileName = extractFilename(localPath)
-  let remoteArg = if args.len == 2: args[1] else: ""
-  let data = readFile(localPath)
-  let setup = cwdPrefix(c) & remotePathSetup("p", remoteArg, fileName)
+proc uploadBytesToRemote(c: var WinRMClient, data, remoteArg, defaultName, label: string): string =
+  let setup = cwdPrefix(c) & remotePathSetup("p", remoteArg, defaultName)
 
   var off = 0
   var chunkSize = PsrpUploadChunkSize
   var uploadedLenCheck = ""
   if data.len <= 1024:
-    drawProgress("upload", 0, data.len)
+    drawProgress(label, 0, data.len)
     let b64 = encode(data)
     let cmd = setup & "$dir = Split-Path -Parent $p; " &
               "if($dir -and -not (Test-Path -LiteralPath $dir)){New-Item -ItemType Directory -Path $dir -Force | Out-Null}; " &
@@ -281,13 +272,13 @@ proc uploadFile(c: var WinRMClient, args: seq[string]) =
               "(Get-Item -LiteralPath $p).Length"
     uploadedLenCheck = runCmdFastOrPsrp(c, cmd).strip()
     off = data.len
-    drawProgress("upload", off, data.len)
+    drawProgress(label, off, data.len)
   else:
     try:
       if c.cmdShellDenied:
         raise newException(IOError, "WinRS stream unavailable for this session")
       statusLine(fgWhite, "[*] Upload mode: WinRS stream")
-      uploadFileStream(c, data, setup, data.len)
+      uploadFileStream(c, data, setup, data.len, label)
     except Exception as e:
       if getEnv("WINRMSHELL_DEBUG") == "1":
         statusLine(fgYellow, "[debug] streaming upload failed: " & e.msg)
@@ -304,7 +295,7 @@ proc uploadFile(c: var WinRMClient, args: seq[string]) =
       let varName = "wrm_upload_" & genUuid().replace("-", "")
       let b64Data = encode(data)
       discard runCmdFastCached(c, "$script:" & varName & " = New-Object System.Text.StringBuilder", false)
-      drawProgress("upload", 0, data.len)
+      drawProgress(label, 0, data.len)
       chunkSize = InMemoryB64ChunkSize
       off = 0
       while off < data.len:
@@ -322,7 +313,7 @@ proc uploadFile(c: var WinRMClient, args: seq[string]) =
             continue
           raise
         off = min((stopB64 div 4) * 3, data.len)
-        drawProgress("upload", off, data.len)
+        drawProgress(label, off, data.len)
       uploadedLenCheck = runCmdFastCached(c, setup &
         "$dir = Split-Path -Parent $p; " &
         "if($dir -and -not (Test-Path -LiteralPath $dir)){New-Item -ItemType Directory -Path $dir -Force | Out-Null}; " &
@@ -334,7 +325,7 @@ proc uploadFile(c: var WinRMClient, args: seq[string]) =
         "$bytes = $null; [GC]::Collect(); " &
         "(Get-Item -LiteralPath $p).Length", false).strip()
       off = data.len
-      drawProgress("upload", off, data.len)
+      drawProgress(label, off, data.len)
 
   echo ""
   let sizeCheck =
@@ -344,6 +335,19 @@ proc uploadFile(c: var WinRMClient, args: seq[string]) =
       runCmdFastOrPsrp(c, setup & "(Get-Item -LiteralPath $p).Length").strip()
   if sizeCheck != $data.len:
     raise newException(IOError, "remote upload size mismatch: expected " & $data.len & " bytes, got " & sizeCheck)
+  result = runCmdFastOrPsrp(c, setup & "(Resolve-Path -LiteralPath $p).Path").strip()
+
+proc uploadFile(c: var WinRMClient, args: seq[string]) =
+  if args.len < 1 or args.len > 2:
+    raise newException(ValueError, "usage: upload <local-file> [remote-file-or-dir]")
+  let localPath = if isAbsolute(args[0]): args[0] else: getCurrentDir() / args[0]
+  if not fileExists(localPath):
+    raise newException(IOError, "local file not found: " & args[0] & " in " & getCurrentDir() & " (" & localPath & ")")
+
+  let fileName = extractFilename(localPath)
+  let remoteArg = if args.len == 2: args[1] else: ""
+  let data = readFile(localPath)
+  discard uploadBytesToRemote(c, data, remoteArg, fileName, "upload")
   styledEcho(fgGreen, "[+] Uploaded " & $data.len & " bytes from " & localPath)
 
 proc uploadDir(c: var WinRMClient, args: seq[string]) =
@@ -725,24 +729,18 @@ proc executeAssembly(c: var WinRMClient, args: seq[string]) =
 
   runManagedAssemblyFromRemotePath(c, remoteExecPath(src), runArgs)
 
-proc downloadFile(c: var WinRMClient, args: seq[string]) =
-  if args.len < 1 or args.len > 2:
-    raise newException(ValueError, "usage: download <remote-file> [local-file-or-dir]")
-  let remoteArg = args[0]
-  let localPath = localDownloadPath(remoteArg, if args.len == 2: args[1] else: "")
+proc downloadRemoteBytes(c: var WinRMClient, remoteArg, label: string): tuple[path: string, data: string] =
   let setup = cwdPrefix(c) & remotePathSetup("p", remoteArg, "")
   let resolved = resolveRemoteFile(c, setup, remoteArg)
   let total = resolved.size
   if total == 0:
-    writeFile(localPath, "")
-    styledEcho(fgGreen, "[+] Downloaded 0 bytes to " & localPath)
-    return
+    return (resolved.path, "")
 
   var data = newStringOfCap(total)
   if not c.cmdShellDenied:
     try:
       statusLine(fgWhite, "[*] Download mode: WinRS binary stream")
-      drawProgress("download", 0, total)
+      drawProgress(label, 0, total)
       let binCmd = setup &
         "$ErrorActionPreference='Stop'; " &
         "if(-not (Test-Path -LiteralPath $p -PathType Leaf)){throw ('remote file not found: ' + $p)}; " &
@@ -752,17 +750,15 @@ proc downloadFile(c: var WinRMClient, args: seq[string]) =
         "try { while(($n = $fs.Read($buf, 0, $buf.Length)) -gt 0) { $out.Write($buf, 0, $n); $out.Flush() } } finally {$fs.Close(); $out.Close()}"
       proc collectBinary(chunk: string) =
         data.add chunk
-        drawProgress("download", min(data.len, total), total)
+        drawProgress(label, min(data.len, total), total)
       discard runBinaryFastCached(c, binCmd, collectBinary)
       if data.len < total:
         raise newException(IOError, "WinRS binary download returned partial data: expected " & $total & " bytes, got " & $data.len)
       if data.len > total:
         data.setLen(total)
-      drawProgress("download", data.len, total)
+      drawProgress(label, data.len, total)
       echo ""
-      writeFile(localPath, data)
-      styledEcho(fgGreen, "[+] Downloaded " & $data.len & " bytes to " & localPath)
-      return
+      return (resolved.path, data)
     except Exception as e:
       let msg = e.msg.toLowerAscii()
       if "access is denied" in msg or "could not find shellid" in msg or
@@ -778,7 +774,7 @@ proc downloadFile(c: var WinRMClient, args: seq[string]) =
     statusLine(fgWhite, "[*] Download mode: PSRP base64 stream")
   else:
     statusLine(fgWhite, "[*] Download mode: WinRS base64 stream")
-  drawProgress("download", 0, total)
+  drawProgress(label, 0, total)
 
   let readChunkSize = if c.cmdShellDenied: PsrpDownloadChunkSize else: DownloadChunkSize
   let lineChars = if c.cmdShellDenied: PsrpDownloadLineChars else: DownloadLineChars
@@ -801,7 +797,7 @@ proc downloadFile(c: var WinRMClient, args: seq[string]) =
           pendingB64.setLen(0)
       elif not (ch in {' ', '\t'}):
         pendingB64.add ch
-    drawProgress("download", min(data.len, total), total)
+    drawProgress(label, min(data.len, total), total)
 
   discard runCmdFastCached(c, cmd, false, collectDownload)
   let finalPart = pendingB64.strip()
@@ -811,9 +807,18 @@ proc downloadFile(c: var WinRMClient, args: seq[string]) =
     raise newException(IOError, "download returned no data from " & (if c.cmdShellDenied: "PSRP" else: "WinRS") & " base64 stream")
   if data.len != total:
     raise newException(IOError, "remote download size mismatch: expected " & $total & " bytes, got " & $data.len)
-  drawProgress("download", data.len, total)
+  drawProgress(label, data.len, total)
 
   echo ""
+  result = (resolved.path, data)
+
+proc downloadFile(c: var WinRMClient, args: seq[string]) =
+  if args.len < 1 or args.len > 2:
+    raise newException(ValueError, "usage: download <remote-file> [local-file-or-dir]")
+  let remoteArg = args[0]
+  let localPath = localDownloadPath(remoteArg, if args.len == 2: args[1] else: "")
+  let downloaded = downloadRemoteBytes(c, remoteArg, "download")
+  let data = downloaded.data
   writeFile(localPath, data)
   styledEcho(fgGreen, "[+] Downloaded " & $data.len & " bytes to " & localPath)
 
@@ -919,6 +924,8 @@ Options:
   !<cmd>             Run as CMD  (e.g. !dir C:\\)
   upload <l> [r]     Upload local file to remote pwd or custom remote path
   download <r> [l]   Download remote file to local pwd or custom local path
+  rupload <r> <s> [d] Upload remote file from active session to another session
+  rdownload <s> <r> [d] Download remote file from another session to active session
   upload-dir <l> [r] Recursively upload local directory
   download-dir <r> [l] Recursively download remote directory
   invoke-script <f> [a] Run local PowerShell script from memory
@@ -1182,6 +1189,62 @@ proc switchSession(name: string) =
   let s = sessions[idx]
   release(sessionsLock)
   styledEcho(fgGreen, "[*] Switched to session: " & s.name & " (" & s.host & ")")
+
+proc lookupSession(name: string): Session =
+  acquire(sessionsLock)
+  try:
+    let idx = findSession(name)
+    if idx >= 0:
+      return sessions[idx]
+  finally:
+    release(sessionsLock)
+  return nil
+
+proc remoteUploadBetweenSessions(src: Session, args: seq[string]) =
+  if args.len < 2 or args.len > 3:
+    raise newException(ValueError, "usage: rupload <remote-file> <session> [remote-file-or-dir]")
+  let dst = lookupSession(args[1])
+  if dst == nil:
+    raise newException(ValueError, "session not found: " & args[1])
+  if dst == src:
+    raise newException(ValueError, "source and destination sessions must be different")
+
+  var copiedPath = ""
+  var data = ""
+  withSessionLock(src):
+    let downloaded = downloadRemoteBytes(src.client, args[0], "rupload-read")
+    copiedPath = downloaded.path
+    data = downloaded.data
+
+  let dstArg = if args.len == 3: args[2] else: ""
+  var writtenPath = ""
+  withSessionLock(dst):
+    writtenPath = uploadBytesToRemote(dst.client, data, dstArg, remoteBaseName(copiedPath), "rupload-write")
+
+  styledEcho(fgGreen, "[+] Remote uploaded " & $data.len & " bytes from " & src.name & ":" & copiedPath & " to " & dst.name & ":" & writtenPath)
+
+proc remoteDownloadBetweenSessions(dst: Session, args: seq[string]) =
+  if args.len < 2 or args.len > 3:
+    raise newException(ValueError, "usage: rdownload <session> <remote-file> [remote-file-or-dir]")
+  let src = lookupSession(args[0])
+  if src == nil:
+    raise newException(ValueError, "session not found: " & args[0])
+  if src == dst:
+    raise newException(ValueError, "source and destination sessions must be different")
+
+  var copiedPath = ""
+  var data = ""
+  withSessionLock(src):
+    let downloaded = downloadRemoteBytes(src.client, args[1], "rdownload-read")
+    copiedPath = downloaded.path
+    data = downloaded.data
+
+  let dstArg = if args.len == 3: args[2] else: ""
+  var writtenPath = ""
+  withSessionLock(dst):
+    writtenPath = uploadBytesToRemote(dst.client, data, dstArg, remoteBaseName(copiedPath), "rdownload-write")
+
+  styledEcho(fgGreen, "[+] Remote downloaded " & $data.len & " bytes from " & src.name & ":" & copiedPath & " to " & dst.name & ":" & writtenPath)
 
 proc createNewSession(args: seq[string]) =
   var host, username, password, ntHash, realm, spn: string
@@ -1598,6 +1661,10 @@ proc main() =
       elif verb == "download":
         withSessionLock(cur):
           downloadFile(cur.client, words[1..^1])
+      elif verb == "rupload":
+        remoteUploadBetweenSessions(cur, words[1..^1])
+      elif verb == "rdownload":
+        remoteDownloadBetweenSessions(cur, words[1..^1])
       elif verb == "upload-dir":
         withSessionLock(cur):
           uploadDir(cur.client, words[1..^1])

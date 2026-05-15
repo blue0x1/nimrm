@@ -2970,7 +2970,7 @@ proc runBinaryFastCached*(c: var WinRMClient, script: string,
         c.cmdShellDenied = true
       raise
 
-proc uploadFileStream*(c: var WinRMClient, data: string, setup: string, total: int) =
+proc uploadFileStream*(c: var WinRMClient, data: string, setup: string, total: int, label = "upload") =
   let shellId = createCmdShell(c)
   try:
     let writer =
@@ -2993,12 +2993,12 @@ proc uploadFileStream*(c: var WinRMClient, data: string, setup: string, total: i
 
     var off = 0
     let chunkSize = 262144
-    drawProgress("upload", 0, total)
+    drawProgress(label, 0, total)
     while off < data.len:
       let stop = min(off + chunkSize, data.len)
       discard c.send(soapSendCmd(c.host, c.port, c.useSSL, c.sessionId, shellId, cmdId, encode(data[off ..< stop]), false))
       off = stop
-      drawProgress("upload", off, total)
+      drawProgress(label, off, total)
     discard c.send(soapSendCmd(c.host, c.port, c.useSSL, c.sessionId, shellId, cmdId, "", true))
 
     var retries = 0

@@ -210,6 +210,8 @@ One-shot command:
 | `!<cmd>` | Run through `cmd.exe` |
 | `upload <local> [remote]` | Upload one file |
 | `download <remote> [local]` | Download one file |
+| `rupload <remote> <session> [dest]` | Copy a remote file from the active session to another session through memory |
+| `rdownload <session> <remote> [dest]` | Copy a remote file from another session to the active session through memory |
 | `upload-dir <local> [remote]` | Upload a directory |
 | `download-dir <remote> [local]` | Download a directory |
 | `invoke-script <ps1> [args]` | Import local PowerShell from memory |
@@ -291,6 +293,8 @@ Transfers:
 ```powershell
 PS> upload ./tool.exe C:\Temp\tool.exe
 PS> download C:\Temp\out.txt ./out.txt
+PS> rupload C:\Temp\tool.exe session-2 C:\Temp\tool.exe
+PS> rdownload session-2 C:\Temp\out.txt C:\Temp\out.txt
 PS> upload-dir ./payloads C:\Temp\payloads
 PS> download-dir C:\Temp\logs ./logs
 ```
