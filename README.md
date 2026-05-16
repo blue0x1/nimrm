@@ -108,6 +108,12 @@ curl -L -o nimrm_1.2.0_amd64.deb https://github.com/blue0x1/nimrm/releases/lates
 sudo dpkg -i nimrm_1.2.0_amd64.deb
 ```
 
+BlackArch:
+
+```bash
+sudo pacman -S nimrm
+```
+
 Build from source:
 
 ```bash
