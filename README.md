@@ -114,6 +114,12 @@ BlackArch:
 sudo pacman -S nimrm
 ```
 
+The BlackArch PKGBUILD tracks the latest upstream git commit, so new releases reach BlackArch users on their next system update. If `nimrm` is already installed, upgrade it with:
+
+```bash
+sudo pacman -Syu nimrm
+```
+
 Build from source:
 
 ```bash
