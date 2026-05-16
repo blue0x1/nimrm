@@ -1,7 +1,7 @@
 ## nimrm.nim
 ## Interactive WinRM Shell Client for Nim
 ## Author: Chokri Hammedi (blue0x1)
-## Version: 1.1.0
+## Version: 1.2.0
 ## Compile: nim c -d:release -d:ssl nimrm.nim
 ##
 ## Legal notice:
@@ -23,6 +23,15 @@ import std/[
 ]
 
 import winrm
+
+const InteractiveCommands = [
+  "/help", "help", "exit", "quit",
+  "upload", "download", "rupload", "rdownload",
+  "upload-dir", "download-dir", "rupload-dir", "rdownload-dir",
+  "invoke-script", "execute-assembly", "exec-assembly",
+  "ad-info", "opsec-check",
+  "sessions", "session", "use", "kill"
+]
 
 type
   Session = ref object
@@ -735,6 +744,17 @@ proc downloadRemoteBytes(c: var WinRMClient, remoteArg, label: string): tuple[pa
   let total = resolved.size
   if total == 0:
     return (resolved.path, "")
+  if total <= 1024:
+    drawProgress(label, 0, total)
+    let b64 = runCmdFastCached(c, setup &
+      "if(-not (Test-Path -LiteralPath $p -PathType Leaf)){throw ('remote file not found: ' + $p)}; " &
+      "[Convert]::ToBase64String([IO.File]::ReadAllBytes($p))", false).strip()
+    let data = decode(b64)
+    if data.len != total:
+      raise newException(IOError, "remote download size mismatch: expected " & $total & " bytes, got " & $data.len)
+    drawProgress(label, data.len, total)
+    echo ""
+    return (resolved.path, data)
 
   var data = newStringOfCap(total)
   if not c.cmdShellDenied:
@@ -830,12 +850,7 @@ proc localDownloadDirPath(remoteArg, localArg: string): string =
     return localArg / name
   result = localArg
 
-proc downloadDir(c: var WinRMClient, args: seq[string]) =
-  if args.len < 1 or args.len > 2:
-    raise newException(ValueError, "usage: download-dir <remote-dir> [local-dir]")
-
-  let remoteArg = args[0]
-  let localRoot = absolutePath(localDownloadDirPath(remoteArg, if args.len == 2: args[1] else: ""))
+proc listRemoteTree(c: var WinRMClient, remoteArg: string): tuple[root: string, dirs: seq[string], files: seq[string]] =
   let setup = cwdPrefix(c) & remotePathSetup("p", remoteArg, "")
   let resolvedRoot = resolveRemoteDir(c, setup, remoteArg)
   let listCmd = setup &
@@ -869,6 +884,19 @@ proc downloadDir(c: var WinRMClient, args: seq[string]) =
 
   if remoteRoot == "":
     raise newException(IOError, "could not resolve remote directory: " & remoteArg)
+
+  result = (remoteRoot, dirs, files)
+
+proc downloadDir(c: var WinRMClient, args: seq[string]) =
+  if args.len < 1 or args.len > 2:
+    raise newException(ValueError, "usage: download-dir <remote-dir> [local-dir]")
+
+  let remoteArg = args[0]
+  let localRoot = absolutePath(localDownloadDirPath(remoteArg, if args.len == 2: args[1] else: ""))
+  let tree = listRemoteTree(c, remoteArg)
+  let remoteRoot = tree.root
+  let dirs = tree.dirs
+  let files = tree.files
 
   createDir(localRoot)
   for d in dirs:
@@ -926,6 +954,8 @@ Options:
   download <r> [l]   Download remote file to local pwd or custom local path
   rupload <r> <s> [d] Upload remote file from active session to another session
   rdownload <s> <r> [d] Download remote file from another session to active session
+  rupload-dir <r> <s> [d] Upload remote directory from active session to another session
+  rdownload-dir <s> <r> [d] Download remote directory from another session to active session
   upload-dir <l> [r] Recursively upload local directory
   download-dir <r> [l] Recursively download remote directory
   invoke-script <f> [a] Run local PowerShell script from memory
@@ -978,8 +1008,134 @@ when defined(posix):
       if errno != EINTR: break
     (true, ch)
 
+type CompletionProc = proc(line: string; cursor: int): tuple[line: string, cursor: int, matches: seq[string]]
+
+proc currentWordBounds(line: string; cursor: int): tuple[start, stop: int] =
+  var start = cursor
+  while start > 0 and not (line[start - 1] in {' ', '\t'}):
+    dec start
+  (start, cursor)
+
+proc commonPrefix(items: seq[string]): string =
+  if items.len == 0:
+    return ""
+  result = items[0]
+  for item in items[1..^1]:
+    var i = 0
+    while i < result.len and i < item.len and result[i] == item[i]:
+      inc i
+    result.setLen(i)
+    if result == "":
+      break
+
+proc shellTokenAt(line: string; cursor: int): tuple[index: int, tokenStart: int, token: string] =
+  var idx = 0
+  var i = 0
+  while i < cursor:
+    while i < cursor and line[i] in {' ', '\t'}:
+      inc i
+    if i >= cursor:
+      return (idx, cursor, "")
+    let start = i
+    while i < cursor and not (line[i] in {' ', '\t'}):
+      inc i
+    if cursor <= i:
+      return (idx, start, line[start..<cursor])
+    inc idx
+  (idx, cursor, "")
+
+proc completeCommand(line: string; cursor: int): tuple[line: string, cursor: int, matches: seq[string]] =
+  let bounds = currentWordBounds(line, cursor)
+  let prefix = line[bounds.start..<bounds.stop].toLowerAscii()
+  var matches: seq[string]
+  for cmd in InteractiveCommands:
+    if cmd.startsWith(prefix):
+      matches.add cmd
+  if matches.len == 0:
+    return (line, cursor, matches)
+  let replacement = commonPrefix(matches)
+  var suffix = ""
+  if matches.len == 1:
+    suffix = " "
+  let tail = if bounds.stop < line.len: line[bounds.stop..^1] else: ""
+  let newLine = line[0..<bounds.start] & replacement & suffix & tail
+  (newLine, bounds.start + replacement.len + suffix.len, matches)
+
+proc completeLocalPath(line: string; cursor: int; tokenStart: int; token: string): tuple[line: string, cursor: int, matches: seq[string]] =
+  var quote = '\0'
+  var raw = token
+  if raw.len > 0 and raw[0] in {'"', '\''}:
+    quote = raw[0]
+    raw = raw[1..^1]
+
+  let expanded =
+    if raw == "~":
+      getHomeDir()
+    elif raw.startsWith("~/"):
+      getHomeDir() / raw[2..^1]
+    else:
+      raw
+
+  let endsWithSep = raw.endsWith("/") or raw.endsWith("\\")
+  let dirPart = if endsWithSep: expanded else: parentDir(expanded)
+  let namePart = if endsWithSep: "" else: extractFilename(expanded)
+  let scanDir = if dirPart == "": "." else: dirPart
+  if not dirExists(scanDir):
+    return (line, cursor, @[])
+
+  let displayDir =
+    if endsWithSep:
+      raw
+    else:
+      let p = parentDir(raw)
+      if p == "." or p == "":
+        ""
+      elif p.endsWith("/") or p.endsWith("\\"):
+        p
+      else:
+        p & "/"
+
+  var matches: seq[string]
+  for kind, path in walkDir(scanDir):
+    let name = extractFilename(path)
+    if name.startsWith(namePart):
+      var item = displayDir & name
+      if kind == pcDir:
+        item.add "/"
+      matches.add item
+
+  if matches.len == 0:
+    return (line, cursor, matches)
+
+  let replacement = commonPrefix(matches)
+  let finalReplacement =
+    if quote != '\0':
+      $quote & replacement
+    else:
+      replacement
+  let tokenStop = cursor
+  let tail = if tokenStop < line.len: line[tokenStop..^1] else: ""
+  let newLine = line[0..<tokenStart] & finalReplacement & tail
+  (newLine, tokenStart + finalReplacement.len, matches)
+
+proc completeInteractiveInput(line: string; cursor: int): tuple[line: string, cursor: int, matches: seq[string]] =
+  let cur = shellTokenAt(line, cursor)
+  if cur.index == 0:
+    return completeCommand(line, cursor)
+
+  let words = shellSplit(line[0..<cursor])
+  if words.len == 0:
+    return (line, cursor, @[])
+  let verb = words[0].toLowerAscii()
+  let localPathArg =
+    (verb in ["upload", "upload-dir", "invoke-script", "execute-assembly", "exec-assembly"] and cur.index == 1)
+  if localPathArg:
+    return completeLocalPath(line, cursor, cur.tokenStart, cur.token)
+  (line, cursor, @[])
+
 proc readLineHistory*(prompt: string; history: var seq[string];
-                      onTick: proc() = nil; tickMs = 1000): string =
+                      onTick: proc() = nil; tickMs = 1000;
+                      completer: CompletionProc = nil): string =
   when not defined(posix):
     stdout.write(prompt); stdout.flushFile()
     return stdin.readLine()
@@ -1002,9 +1158,22 @@ proc readLineHistory*(prompt: string; history: var seq[string];
     pfd.fd = STDIN_FILENO.cint
     pfd.events = POLLIN.cshort
 
+    proc ghostSuffix(): string =
+      if completer == nil or cursor != buf.len:
+        return ""
+      let completed = completer(buf, cursor)
+      if completed.matches.len == 0 or completed.line == buf:
+        return ""
+      if completed.line.startsWith(buf):
+        return completed.line[buf.len..^1]
+      result = ""
+
     proc redraw() =
+      let ghost = ghostSuffix()
       stdout.write("\r\x1b[2K" & prompt & buf)
-      let back = buf.len - cursor
+      if ghost.len > 0:
+        stdout.write("\x1b[90m" & ghost & "\x1b[0m")
+      let back = buf.len - cursor + ghost.len
       if back > 0:
         stdout.write("\x1b[" & $back & "D")
       stdout.flushFile()
@@ -1027,6 +1196,17 @@ proc readLineHistory*(prompt: string; history: var seq[string];
           buf.delete((cursor - 1)..(cursor - 1))
           dec cursor
           redraw()
+      of '\t':
+        if completer != nil:
+          let completed = completer(buf, cursor)
+          if completed.matches.len > 0:
+            if completed.line != buf or completed.cursor != cursor:
+              buf = completed.line
+              cursor = completed.cursor
+              redraw()
+            elif completed.matches.len > 1:
+              stdout.write("\n" & completed.matches.join("  ") & "\n")
+              redraw()
       of '\x1b':
         let (got2, c2) = rawReadTimeout(50)
         if got2 and c2 == '[':
@@ -1245,6 +1425,57 @@ proc remoteDownloadBetweenSessions(dst: Session, args: seq[string]) =
     writtenPath = uploadBytesToRemote(dst.client, data, dstArg, remoteBaseName(copiedPath), "rdownload-write")
 
   styledEcho(fgGreen, "[+] Remote downloaded " & $data.len & " bytes from " & src.name & ":" & copiedPath & " to " & dst.name & ":" & writtenPath)
+
+proc remoteCopyDirBetweenSessions(src, dst: Session, srcArg, dstArg, readLabel, writeLabel, summaryVerb: string) =
+  if dst == nil:
+    raise newException(ValueError, "destination session not found")
+  if src == nil:
+    raise newException(ValueError, "source session not found")
+  if src == dst:
+    raise newException(ValueError, "source and destination sessions must be different")
+
+  var tree: tuple[root: string, dirs: seq[string], files: seq[string]]
+  withSessionLock(src):
+    tree = listRemoteTree(src.client, srcArg)
+
+  let dstRootArg = if dstArg != "": dstArg else: remoteBaseName(tree.root)
+  withSessionLock(dst):
+    discard runCmdFastOrPsrp(dst.client, cwdPrefix(dst.client) & remotePathSetup("root", dstRootArg, remoteBaseName(tree.root)) &
+      "if(-not (Test-Path -LiteralPath $root)){New-Item -ItemType Directory -Path $root -Force | Out-Null}")
+    for d in tree.dirs:
+      let remoteDir = remoteJoin(dstRootArg, d)
+      discard runCmdFastOrPsrp(dst.client, cwdPrefix(dst.client) & remotePathSetup("d", remoteDir, "") &
+        "if(-not (Test-Path -LiteralPath $d)){New-Item -ItemType Directory -Path $d -Force | Out-Null}")
+
+  var done = 0
+  for f in tree.files:
+    inc done
+    styledEcho(fgYellow, fmt"[*] {summaryVerb}-dir [{done}/{tree.files.len}] {f}")
+    var data = ""
+    withSessionLock(src):
+      data = downloadRemoteBytes(src.client, remoteJoin(tree.root, f), readLabel).data
+    withSessionLock(dst):
+      discard uploadBytesToRemote(dst.client, data, remoteJoin(dstRootArg, f), remoteBaseName(f), writeLabel)
+
+  styledEcho(fgGreen, fmt"[+] Remote {summaryVerb}ed directory {src.name}:{tree.root} to {dst.name}:{dstRootArg} ({tree.files.len} files, {tree.dirs.len} dirs)")
+
+proc remoteUploadDirBetweenSessions(src: Session, args: seq[string]) =
+  if args.len < 2 or args.len > 3:
+    raise newException(ValueError, "usage: rupload-dir <remote-dir> <session> [remote-dir]")
+  let dst = lookupSession(args[1])
+  if dst == nil:
+    raise newException(ValueError, "session not found: " & args[1])
+  let dstArg = if args.len == 3: args[2] else: ""
+  remoteCopyDirBetweenSessions(src, dst, args[0], dstArg, "rupload-dir-read", "rupload-dir-write", "upload")
+
+proc remoteDownloadDirBetweenSessions(dst: Session, args: seq[string]) =
+  if args.len < 2 or args.len > 3:
+    raise newException(ValueError, "usage: rdownload-dir <session> <remote-dir> [remote-dir]")
+  let src = lookupSession(args[0])
+  if src == nil:
+    raise newException(ValueError, "session not found: " & args[0])
+  let dstArg = if args.len == 3: args[2] else: ""
+  remoteCopyDirBetweenSessions(src, dst, args[1], dstArg, "rdownload-dir-read", "rdownload-dir-write", "download")
 
 proc createNewSession(args: seq[string]) =
   var host, username, password, ntHash, realm, spn: string
@@ -1604,7 +1835,7 @@ proc main() =
       let promptStr = ansiForegroundColorCode(fgRed) & "nimrm> " & ansiResetCode
       var line: string
       try:
-        line = readLineHistory(promptStr, cmdHistory).strip()
+        line = readLineHistory(promptStr, cmdHistory, completer = completeInteractiveInput).strip()
       except EOFError:
         echo ""; break
       if line == "": continue
@@ -1631,7 +1862,7 @@ proc main() =
     cur.lastKeepAliveAt = epochTime()
     var line: string
     try:
-      line = readLineHistory(promptStr, cmdHistory).strip()
+      line = readLineHistory(promptStr, cmdHistory, completer = completeInteractiveInput).strip()
     except EOFError:
       echo ""; break
 
@@ -1665,6 +1896,10 @@ proc main() =
         remoteUploadBetweenSessions(cur, words[1..^1])
       elif verb == "rdownload":
         remoteDownloadBetweenSessions(cur, words[1..^1])
+      elif verb == "rupload-dir":
+        remoteUploadDirBetweenSessions(cur, words[1..^1])
+      elif verb == "rdownload-dir":
+        remoteDownloadDirBetweenSessions(cur, words[1..^1])
       elif verb == "upload-dir":
         withSessionLock(cur):
           uploadDir(cur.client, words[1..^1])

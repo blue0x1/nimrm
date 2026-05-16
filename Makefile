@@ -2,7 +2,7 @@
 
 BIN     = nimrm
 SRC     = nimrm.nim
-VERSION = 1.1.0
+VERSION = 1.2.0
 DEB     = $(BIN)_$(VERSION)_amd64.deb
 DEBDIR  = build/deb/$(BIN)
 NIMC    = nim

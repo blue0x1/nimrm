@@ -2226,6 +2226,16 @@ proc isRetryableSessionLoss(c: WinRMClient, e: ref Exception): bool =
            "invalid token was supplied" in m or
            "gss_init_sec_context failed" in m
 
+proc isStaleWinrsShellMessage(msg: string): bool =
+  let m = msg.toLowerAscii()
+  result = "shellid" in m or
+           "shell id" in m or
+           "invalid shell" in m or
+           "shell was not found" in m or
+           "cannot find the shell" in m or
+           "could not find shell" in m or
+           "winrs command receive timed out" in m
+
 proc isTransportError(e: ref CatchableError): bool =
   let m = e.msg.toLowerAscii()
   result = "connection reset" in m or
@@ -2794,6 +2804,7 @@ proc runCmdOnShell(c: var WinRMClient, shellId, cmd: string, isCmd: bool,
     cmdId = requestedCmdId
   if cmdId == "":
     raise newException(IOError, "Could not get CommandId from: " & cmdXml[0..min(2000, cmdXml.len-1)])
+  var doneSeen = false
   try:
     var retries = 0
     while retries < 120:
@@ -2815,9 +2826,12 @@ proc runCmdOnShell(c: var WinRMClient, shellId, cmd: string, isCmd: bool,
           " bytes=" & $recvXml.len & " chunk=" & $chunk.len & " done=" & $done &
           (if ft != "": " fault=" & ft else: ""))
       if done:
+        doneSeen = true
         break
       sleep(15)
       inc retries
+    if not doneSeen:
+      raise newException(IOError, "WinRS command receive timed out")
   finally:
     try:
       discard c.send(soapCleanupCmd(c.host, c.port, c.useSSL, c.sessionId, shellId, cmdId))
@@ -2892,6 +2906,8 @@ proc runCmdFastCached*(c: var WinRMClient, cmd: string, isCmd: bool,
     except Exception as e:
       let msg = e.msg.toLowerAscii()
       c.cmdShellId = ""
+      if isStaleWinrsShellMessage(msg) and tries > 0:
+        continue
       if isRetryableSessionLoss(c, e) and tries > 0:
         resetTransport(c)
         continue
@@ -2908,7 +2924,6 @@ proc keepAliveSmart*(c: var WinRMClient): bool =
       ensureShell(c, false)
     return keepAliveShell(c)
   if c.cmdShellId != "":
-    discard runCmdOnShell(c, c.cmdShellId, "rem nimrm keepalive", true)
     return true
   result = false
 

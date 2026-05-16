@@ -11,7 +11,7 @@
 
 <p align="center">
   <sub>
-    <b>Version</b> 1.1.0 ·
+    <b>Version</b> 1.2.0 ·
     <b>Author</b> Chokri Hammedi (blue0x1) ·
     <b>License</b> MIT
   </sub>
@@ -65,8 +65,8 @@
 | --- | --- |
 | Authentication | NTLM password, NTLM hash, Kerberos via `KRB5CCNAME` |
 | WinRM transport | HTTP, HTTPS/TLS, custom port |
-| Shell | Interactive PowerShell, CMD prefix, one-shot command mode |
-| Transfers | File upload/download, recursive directory transfer, remote session-to-session file relay |
+| Shell | Interactive PowerShell, CMD prefix, one-shot command mode, command and local path autocomplete |
+| Transfers | File upload/download, recursive directory transfer, remote session-to-session file and directory relay |
 | In-memory | PowerShell script import, managed .NET assembly execution |
 | Reporting | AD/domain context, logging and auditing posture |
 | Reliability | Kerberos message wrapping, transport reset/retry handling |
@@ -104,8 +104,8 @@ Invoke-WebRequest -Uri https://github.com/blue0x1/nimrm/releases/latest/download
 Debian package:
 
 ```bash
-curl -L -o nimrm_1.1.0_amd64.deb https://github.com/blue0x1/nimrm/releases/latest/download/nimrm_1.1.0_amd64.deb
-sudo dpkg -i nimrm_1.1.0_amd64.deb
+curl -L -o nimrm_1.2.0_amd64.deb https://github.com/blue0x1/nimrm/releases/latest/download/nimrm_1.2.0_amd64.deb
+sudo dpkg -i nimrm_1.2.0_amd64.deb
 ```
 
 Build from source:
@@ -143,7 +143,7 @@ nim c -d:release --opt:speed -o:nimrm nimrm.nim
 | Operation | Implementation |
 | --- | --- |
 | Upload | Chunked Base64 writes with adaptive retry on large envelopes |
-| Download | Streamed Base64 chunks with progress tracking |
+| Download | Streamed Base64 chunks with progress tracking and a fast path for small files |
 | Remote session relay | Reads from one WinRM session and writes to another through controller memory without writing the file to local disk |
 | Directory transfer | Recursive file enumeration using the same chunked transfer path |
 | Command execution | Reuses the active WinRM shell/runspace instead of reconnecting per command |
@@ -213,6 +213,8 @@ One-shot command:
 | `download <remote> [local]` | Download one file |
 | `rupload <remote> <session> [dest]` | Copy a remote file from the active session to another session through memory |
 | `rdownload <session> <remote> [dest]` | Copy a remote file from another session to the active session through memory |
+| `rupload-dir <remote> <session> [dest]` | Copy a remote directory from the active session to another session through memory |
+| `rdownload-dir <session> <remote> [dest]` | Copy a remote directory from another session to the active session through memory |
 | `upload-dir <local> [remote]` | Upload a directory |
 | `download-dir <remote> [local]` | Download a directory |
 | `invoke-script <ps1> [args]` | Import local PowerShell from memory |
@@ -278,7 +280,7 @@ Copy files between active sessions:
 [+] Remote downloaded 1024 bytes from session-2:C:\Users\user2\Desktop\out.txt to session-1:C:\Users\user1\out.txt
 ```
 
-`rupload` uses the active session as the source and the named session as the destination. `rdownload` uses the named session as the source and the active session as the destination. Both commands relay bytes through `nimrm` memory, so the controller host does not write a temporary copy to disk.
+`rupload` and `rupload-dir` use the active session as the source and the named session as the destination. `rdownload` and `rdownload-dir` use the named session as the source and the active session as the destination. These commands relay bytes through `nimrm` memory, so the controller host does not write a temporary copy to disk.
 
 Session options:
 
@@ -312,6 +314,8 @@ PS> upload ./tool.exe C:\Temp\tool.exe
 PS> download C:\Temp\out.txt ./out.txt
 PS> rupload C:\Temp\tool.exe session-2 C:\Temp\tool.exe
 PS> rdownload session-2 C:\Temp\out.txt C:\Temp\out.txt
+PS> rupload-dir C:\Temp\logs session-2 C:\Temp\logs
+PS> rdownload-dir session-2 C:\Temp\loot C:\Temp\loot
 PS> upload-dir ./payloads C:\Temp\payloads
 PS> download-dir C:\Temp\logs ./logs
 ```
@@ -325,6 +329,15 @@ PS> rupload C:\Temp\payload.exe session-2 C:\Users\Public\payload.exe
 # Another session -> active session
 PS> rdownload session-2 C:\Users\Public\loot.zip C:\Temp\loot.zip
 ```
+
+Autocomplete:
+
+```powershell
+PS> upl<Tab>
+PS> upload ./pay<Tab>
+```
+
+The interactive prompt completes command names and local filesystem paths for local-source commands such as `upload`, `upload-dir`, `invoke-script`, and `execute-assembly`.
 
 In-memory helpers:
 
@@ -343,7 +356,7 @@ PS> opsec-check
 
 - `execute-assembly` supports managed .NET assemblies only.
 - `invoke-script` imports into the current remote runspace.
-- `rupload` and `rdownload` do not write temporary files on the controller host, but the bytes still pass through controller memory and use two WinRM transfer legs.
+- `rupload`, `rdownload`, `rupload-dir`, and `rdownload-dir` do not write temporary files on the controller host, but the bytes still pass through controller memory and use two WinRM transfer legs.
 - `ad-info` and `opsec-check` are read-only reporting commands.
 - Some reporting data requires sufficient remote privileges.
 
