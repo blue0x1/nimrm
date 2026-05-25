@@ -96,6 +96,7 @@ proc secToDur*(seconds: int): string =
 const
   WSManMaxEnvelope* = 153600
   WSManOperationTimeout* = 60
+  WSManShellIdleTimeout* = 604800
   WSManLocale* = "en-US"
   WSManUserAgent* = "nimrm/1.0"
 
@@ -1334,7 +1335,7 @@ proc soapCreate(host: string, port: int, ssl: bool, sessionId, runspaceId: strin
 </env:Header>
 <env:Body>
   <rsp:Shell ShellId="{runspaceId}" Name="Runspace">
-    <rsp:IdleTimeOut>PT7200.000S</rsp:IdleTimeOut>
+    <rsp:IdleTimeOut>{secToDur(WSManShellIdleTimeout)}</rsp:IdleTimeOut>
     <rsp:InputStreams>stdin pr</rsp:InputStreams>
     <rsp:OutputStreams>stdout</rsp:OutputStreams>
     <creationXml xmlns="http://schemas.microsoft.com/powershell">{creationXml}</creationXml>
@@ -1508,7 +1509,7 @@ proc soapCreateCmd(host: string, port: int, ssl: bool, sessionId: string): strin
 </env:Header>
 <env:Body>
   <rsp:Shell>
-    <rsp:IdleTimeOut>PT7200.000S</rsp:IdleTimeOut>
+    <rsp:IdleTimeOut>{secToDur(WSManShellIdleTimeout)}</rsp:IdleTimeOut>
     <rsp:InputStreams>stdin</rsp:InputStreams>
     <rsp:OutputStreams>stdout stderr</rsp:OutputStreams>
   </rsp:Shell>
@@ -2562,6 +2563,35 @@ proc keepAliveShell*(c: var WinRMClient): bool =
   discard c.send(soapKeepAlive(c.host, c.port, c.useSSL, c.sessionId, c.shellId))
   result = true
 
+proc keepAliveCmdShell(c: var WinRMClient): bool =
+  if c.cmdShellId == "":
+    return false
+  let requestedCmdId = genUuid().toUpperAscii()
+  let cmdXml = c.send(soapRunCmd(c.host, c.port, c.useSSL, c.sessionId,
+    c.cmdShellId, requestedCmdId, "cmd.exe", "/c echo nimrm-keepalive"))
+  var cmdId = extractCommandId(cmdXml)
+  if cmdId == "":
+    cmdId = requestedCmdId
+  try:
+    for _ in 0..<5:
+      let recvXml = c.send(soapReceiveCmd(c.host, c.port, c.useSSL, c.sessionId, c.cmdShellId, cmdId))
+      if isDone(recvXml):
+        result = true
+        break
+      if not isWinrmReceiveTimeout(recvXml):
+        sleep(15)
+  except CatchableError:
+    c.cmdShellId = ""
+    raise
+  finally:
+    try:
+      discard c.send(soapCleanupCmd(c.host, c.port, c.useSSL, c.sessionId, c.cmdShellId, cmdId))
+    except CatchableError:
+      discard
+  if not result:
+    c.cmdShellId = ""
+    raise newException(IOError, "WinRS keepalive receive timed out")
+
 proc firstCommandToken(cmd: string): string =
   var s = cmd.strip()
   if s == "": return ""
@@ -2924,7 +2954,7 @@ proc keepAliveSmart*(c: var WinRMClient): bool =
       ensureShell(c, false)
     return keepAliveShell(c)
   if c.cmdShellId != "":
-    return true
+    return keepAliveCmdShell(c)
   result = false
 
 proc warmSmartShell*(c: var WinRMClient, showStatus = true) =

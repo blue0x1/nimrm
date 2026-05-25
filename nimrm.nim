@@ -1293,6 +1293,26 @@ proc stopMaintenance() =
   joinThread(maintenanceThread)
   maintenanceStarted = false
 
+proc markAllSessionsDisconnected(): seq[Session] =
+  acquire(sessionsLock)
+  try:
+    for s in sessions:
+      if s != nil:
+        s.connected = false
+    result = sessions
+  finally:
+    release(sessionsLock)
+
+proc closeSessionTransport(s: Session) =
+  if s == nil:
+    return
+  withSessionLock(s):
+    s.connected = false
+    try:
+      closeNtlm(s.client)
+    except:
+      discard
+
 proc activeSession(): Session =
   acquire(sessionsLock)
   try:
@@ -1340,6 +1360,7 @@ proc killSession(name: string) =
   let s = sessions[idx]
   release(sessionsLock)
   withSessionLock(s):
+    s.connected = false
     try:
       deleteShell(s.client)
       closeNtlm(s.client)
@@ -1976,14 +1997,19 @@ proc main() =
           else:
             break
 
+  let shutdownSessions = markAllSessionsDisconnected()
   stopMaintenance()
-  for s in sessions:
-    try:
-      styledEcho(fgYellow, "[*] Closing session: " & s.name)
-      deleteShell(s.client)
-      closeNtlm(s.client)
-    except:
-      discard
+  for s in shutdownSessions:
+    styledEcho(fgYellow, "[*] Closing session: " & s.name)
+    if getEnv("NIMRM_GRACEFUL_EXIT") == "1":
+      withSessionLock(s):
+        try:
+          deleteShell(s.client)
+          closeNtlm(s.client)
+        except:
+          discard
+    else:
+      closeSessionTransport(s)
   styledEcho(fgGreen, "[+] Done. Goodbye!")
 
 main()
