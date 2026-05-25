@@ -536,7 +536,10 @@ try {
 proc opsecCheck(c: var WinRMClient) =
   let cmd = """
 $ErrorActionPreference = 'Continue'
-function Write-OpsecField($k,$v){ if($null -ne $v -and "$v".Length -gt 0){ "{0,-32} {1}" -f ($k + ':'), $v } }
+function Write-OpsecField($k,$v){
+  if($null -eq $v -or "$v".Length -eq 0){ $v = '(not configured)' }
+  "{0,-34} {1}" -f ($k + ':'), $v
+}
 function Get-OpsecRegValue($path,$name){
   try {
     $v = Get-ItemProperty -LiteralPath $path -Name $name -ErrorAction Stop
@@ -546,22 +549,48 @@ function Get-OpsecRegValue($path,$name){
   }
 }
 function Get-OpsecLogEnabled($log){
-  try { return (Get-WinEvent -ListLog $log -ErrorAction Stop).IsEnabled } catch { return 'unavailable' }
+  try {
+    $l = Get-WinEvent -ListLog $log -ErrorAction Stop
+    return ("{0} (records={1})" -f $l.IsEnabled, $l.RecordCount)
+  } catch {
+    return ('unavailable: ' + $_.Exception.Message)
+  }
 }
 function Get-OpsecRecentEventCount($log,$ids){
   try {
     $f = @{LogName=$log; StartTime=(Get-Date).AddHours(-24)}
     if($ids){ $f.Id = $ids }
-    return @(Get-WinEvent -FilterHashtable $f -MaxEvents 20 -ErrorAction Stop).Count
+    return @(Get-WinEvent -FilterHashtable $f -MaxEvents 200 -ErrorAction Stop).Count
   } catch {
+    if($_.Exception.Message -match 'No events were found'){ return 0 }
+    return ('unavailable: ' + $_.Exception.Message)
+  }
+}
+function Get-OpsecAuditSubcategory($subcategory){
+  try {
+    $out = & auditpol.exe /get /subcategory:$subcategory 2>$null
+    if($LASTEXITCODE -eq 0){ return (($out | Where-Object { $_ -match $subcategory }) -join ' ').Trim() }
     return 'unavailable'
+  } catch {
+    return ('unavailable: ' + $_.Exception.Message)
+  }
+}
+function Get-OpsecServiceState($name){
+  try {
+    $svc = Get-Service -Name $name -ErrorAction Stop
+    return ($svc.Status.ToString() + ' start=' + (Get-CimInstance Win32_Service -Filter ("Name='{0}'" -f $name) -ErrorAction Stop).StartMode)
+  } catch {
+    return ('unavailable: ' + $_.Exception.Message)
   }
 }
 
 '== Identity / Session =='
 Write-OpsecField 'User' ([Security.Principal.WindowsIdentity]::GetCurrent().Name)
 Write-OpsecField 'Computer' $env:COMPUTERNAME
+Write-OpsecField 'Domain role' ((Get-CimInstance Win32_ComputerSystem).DomainRole)
 Write-OpsecField 'PowerShell version' $PSVersionTable.PSVersion
+Write-OpsecField 'Language mode' $ExecutionContext.SessionState.LanguageMode
+Write-OpsecField 'Execution policy' (Get-ExecutionPolicy -Scope LocalMachine)
 Write-OpsecField 'Host process' ((Get-Process -Id $PID).ProcessName + ' pid=' + $PID)
 Write-OpsecField 'Current time' (Get-Date)
 ''
@@ -569,11 +598,14 @@ Write-OpsecField 'Current time' (Get-Date)
 '== WinRM / PowerShell Logs =='
 Write-OpsecField 'WinRM Operational enabled' (Get-OpsecLogEnabled 'Microsoft-Windows-WinRM/Operational')
 Write-OpsecField 'PowerShell Operational enabled' (Get-OpsecLogEnabled 'Microsoft-Windows-PowerShell/Operational')
+Write-OpsecField 'Windows PowerShell enabled' (Get-OpsecLogEnabled 'Windows PowerShell')
 Write-OpsecField 'PowerShellCore Operational enabled' (Get-OpsecLogEnabled 'PowerShellCore/Operational')
 Write-OpsecField 'Security log enabled' (Get-OpsecLogEnabled 'Security')
 Write-OpsecField 'Recent WinRM events 24h' (Get-OpsecRecentEventCount 'Microsoft-Windows-WinRM/Operational' $null)
 Write-OpsecField 'Recent PS 4103/4104 24h' (Get-OpsecRecentEventCount 'Microsoft-Windows-PowerShell/Operational' @(4103,4104))
+Write-OpsecField 'Recent PowerShell 400/600 24h' (Get-OpsecRecentEventCount 'Windows PowerShell' @(400,600))
 Write-OpsecField 'Recent logon 4624 24h' (Get-OpsecRecentEventCount 'Security' @(4624))
+Write-OpsecField 'Recent process 4688 24h' (Get-OpsecRecentEventCount 'Security' @(4688))
 ''
 
 '== PowerShell Logging Policy =='
@@ -581,37 +613,49 @@ $base = 'HKLM:\Software\Policies\Microsoft\Windows\PowerShell'
 $sb = Join-Path $base 'ScriptBlockLogging'
 $mod = Join-Path $base 'ModuleLogging'
 $trans = Join-Path $base 'Transcription'
-$v = Get-OpsecRegValue $sb 'EnableScriptBlockLogging'; Write-OpsecField 'ScriptBlockLogging' $v
-$v = Get-OpsecRegValue $sb 'EnableScriptBlockInvocationLogging'; Write-OpsecField 'ScriptBlockInvocationLogging' $v
-$v = Get-OpsecRegValue $mod 'EnableModuleLogging'; Write-OpsecField 'ModuleLogging' $v
+Write-OpsecField 'ScriptBlockLogging' (Get-OpsecRegValue $sb 'EnableScriptBlockLogging')
+Write-OpsecField 'ScriptBlockInvocationLogging' (Get-OpsecRegValue $sb 'EnableScriptBlockInvocationLogging')
+Write-OpsecField 'ModuleLogging' (Get-OpsecRegValue $mod 'EnableModuleLogging')
 try {
   $mods = (Get-ItemProperty -LiteralPath (Join-Path $mod 'ModuleNames') -ErrorAction Stop).PSObject.Properties |
     Where-Object { $_.Name -notmatch '^PS' } | ForEach-Object { $_.Name + '=' + $_.Value }
   Write-OpsecField 'Logged modules' ($mods -join ', ')
-} catch { Write-OpsecField 'Logged modules' $null }
-$v = Get-OpsecRegValue $trans 'EnableTranscripting'; Write-OpsecField 'Transcription' $v
-$v = Get-OpsecRegValue $trans 'OutputDirectory'; Write-OpsecField 'Transcript directory' $v
-$v = Get-OpsecRegValue $trans 'EnableInvocationHeader'; Write-OpsecField 'Invocation headers' $v
+} catch { Write-OpsecField 'Logged modules' '(not configured)' }
+Write-OpsecField 'Transcription' (Get-OpsecRegValue $trans 'EnableTranscripting')
+Write-OpsecField 'Transcript directory' (Get-OpsecRegValue $trans 'OutputDirectory')
+Write-OpsecField 'Invocation headers' (Get-OpsecRegValue $trans 'EnableInvocationHeader')
+try { $psrl = (Get-PSReadLineOption).HistorySavePath } catch { $psrl = 'unavailable: ' + $_.Exception.Message }
+Write-OpsecField 'PSReadLine history' $psrl
 ''
 
 '== Process Creation / Command Line Auditing =='
-$audit = & auditpol.exe /get /subcategory:'Process Creation' 2>$null
-if($LASTEXITCODE -eq 0){ $audit | ForEach-Object { $_ } } else { Write-OpsecField 'auditpol' 'unavailable' }
-$v = Get-OpsecRegValue 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Policies\System\Audit' 'ProcessCreationIncludeCmdLine_Enabled'; Write-OpsecField 'CommandLine in 4688' $v
+Write-OpsecField 'Process Creation audit' (Get-OpsecAuditSubcategory 'Process Creation')
+Write-OpsecField 'CommandLine in 4688' (Get-OpsecRegValue 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Policies\System\Audit' 'ProcessCreationIncludeCmdLine_Enabled')
+$sysmon = Get-OpsecServiceState 'Sysmon64'
+if($sysmon -like 'unavailable:*'){ $sysmon = Get-OpsecServiceState 'Sysmon' }
+Write-OpsecField 'Sysmon service' $sysmon
 ''
 
 '== Defender / AMSI Indicators =='
+Write-OpsecField 'WinDefend service' (Get-OpsecServiceState 'WinDefend')
+Write-OpsecField 'Sense service' (Get-OpsecServiceState 'Sense')
 try {
   $mp = Get-MpComputerStatus -ErrorAction Stop
   Write-OpsecField 'Defender real-time' $mp.RealTimeProtectionEnabled
   Write-OpsecField 'Defender AM service' $mp.AMServiceEnabled
   Write-OpsecField 'Defender signatures' $mp.AntivirusSignatureLastUpdated
-} catch { Write-OpsecField 'Defender status' $_.Exception.Message }
+  Write-OpsecField 'Defender engine' $mp.AMEngineVersion
+} catch { Write-OpsecField 'Defender status' ('unavailable: ' + $_.Exception.Message) }
 try {
   $pref = Get-MpPreference -ErrorAction Stop
   Write-OpsecField 'Defender exclusions path' (($pref.ExclusionPath | Select-Object -First 8) -join ', ')
   Write-OpsecField 'Defender exclusions proc' (($pref.ExclusionProcess | Select-Object -First 8) -join ', ')
-} catch { Write-OpsecField 'Defender prefs' $_.Exception.Message }
+  Write-OpsecField 'Defender cloud protection' $pref.MAPSReporting
+} catch { Write-OpsecField 'Defender prefs' ('unavailable: ' + $_.Exception.Message) }
+try {
+  $amsi = Get-ChildItem 'HKLM:\Software\Microsoft\AMSI\Providers' -ErrorAction Stop | Select-Object -ExpandProperty PSChildName
+  Write-OpsecField 'AMSI providers' (($amsi | Select-Object -First 8) -join ', ')
+} catch { Write-OpsecField 'AMSI providers' ('unavailable: ' + $_.Exception.Message) }
 ''
 
 '== Likely Event Trail =='
