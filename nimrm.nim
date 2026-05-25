@@ -553,6 +553,12 @@ function Get-OpsecLogEnabled($log){
     $l = Get-WinEvent -ListLog $log -ErrorAction Stop
     return ("{0} (records={1})" -f $l.IsEnabled, $l.RecordCount)
   } catch {
+    if($_.Exception.Message -match 'unauthorized operation|Access is denied'){
+      return 'access denied'
+    }
+    if($_.Exception.Message -match 'does not exist|There is not an event log'){
+      return 'not present'
+    }
     return ('unavailable: ' + $_.Exception.Message)
   }
 }
@@ -560,9 +566,14 @@ function Get-OpsecRecentEventCount($log,$ids){
   try {
     $f = @{LogName=$log; StartTime=(Get-Date).AddHours(-24)}
     if($ids){ $f.Id = $ids }
-    return @(Get-WinEvent -FilterHashtable $f -MaxEvents 200 -ErrorAction Stop).Count
+    $max = 200
+    $count = @(Get-WinEvent -FilterHashtable $f -MaxEvents $max -ErrorAction Stop).Count
+    if($count -ge $max){ return (">={0}" -f $max) }
+    return $count
   } catch {
     if($_.Exception.Message -match 'No events were found'){ return 0 }
+    if($_.Exception.Message -match 'unauthorized operation|Access is denied'){ return 'access denied' }
+    if($_.Exception.Message -match 'does not exist|There is not an event log'){ return 'not present' }
     return ('unavailable: ' + $_.Exception.Message)
   }
 }
@@ -580,14 +591,26 @@ function Get-OpsecServiceState($name){
     $svc = Get-Service -Name $name -ErrorAction Stop
     return ($svc.Status.ToString() + ' start=' + (Get-CimInstance Win32_Service -Filter ("Name='{0}'" -f $name) -ErrorAction Stop).StartMode)
   } catch {
+    if($_.Exception.Message -match 'Cannot find any service'){ return 'not installed' }
     return ('unavailable: ' + $_.Exception.Message)
+  }
+}
+function Get-OpsecDomainRoleName($role){
+  switch([int]$role){
+    0 { 'Standalone Workstation (0)' }
+    1 { 'Member Workstation (1)' }
+    2 { 'Standalone Server (2)' }
+    3 { 'Member Server (3)' }
+    4 { 'Backup Domain Controller (4)' }
+    5 { 'Primary Domain Controller (5)' }
+    default { "$role" }
   }
 }
 
 '== Identity / Session =='
 Write-OpsecField 'User' ([Security.Principal.WindowsIdentity]::GetCurrent().Name)
 Write-OpsecField 'Computer' $env:COMPUTERNAME
-Write-OpsecField 'Domain role' ((Get-CimInstance Win32_ComputerSystem).DomainRole)
+Write-OpsecField 'Domain role' (Get-OpsecDomainRoleName ((Get-CimInstance Win32_ComputerSystem).DomainRole))
 Write-OpsecField 'PowerShell version' $PSVersionTable.PSVersion
 Write-OpsecField 'Language mode' $ExecutionContext.SessionState.LanguageMode
 Write-OpsecField 'Execution policy' (Get-ExecutionPolicy -Scope LocalMachine)
