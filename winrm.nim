@@ -1549,7 +1549,8 @@ proc soapRunCmd(host: string, port: int, ssl: bool, sessionId, shellId, cmdId, e
 </env:Body>
 </env:Envelope>"""
 
-proc soapReceiveCmd(host: string, port: int, ssl: bool, sessionId, shellId, cmdId: string): string =
+proc soapReceiveCmd(host: string, port: int, ssl: bool, sessionId, shellId, cmdId: string,
+                    operationTimeoutSec = WSManOperationTimeout): string =
   let scheme = if ssl: "https" else: "http"
   let url    = fmt"{scheme}://{host}:{port}/wsman"
   fmt"""<env:Envelope xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:env="http://www.w3.org/2003/05/soap-envelope"
@@ -1567,7 +1568,7 @@ proc soapReceiveCmd(host: string, port: int, ssl: bool, sessionId, shellId, cmdI
   <w:ResourceURI mustUnderstand="true">{RESOURCE_URI_CMD}</w:ResourceURI>
   <w:SelectorSet><w:Selector Name="ShellId">{shellId}</w:Selector></w:SelectorSet>
   <p:SessionId mustUnderstand="false">uuid:{sessionId}</p:SessionId>
-  <w:OperationTimeout>{secToDur(WSManOperationTimeout)}</w:OperationTimeout>
+  <w:OperationTimeout>{secToDur(operationTimeoutSec)}</w:OperationTimeout>
   <w:MaxEnvelopeSize mustUnderstand="true">{WSManMaxEnvelope}</w:MaxEnvelopeSize>
 </env:Header>
 <env:Body>
@@ -1771,6 +1772,7 @@ type
     auth:         AuthMethod
     msgEnc:       MessageEncryption
     useSSL:       bool
+    sslNoVerify:  bool
     port:         int
     shellId*:     string
     sessionId:    string
@@ -1795,14 +1797,21 @@ type
 
 proc newClient*(host, user, pass, ntHash, spn, domain: string,
                auth: AuthMethod, ssl: bool, port: int,
-               msgEnc = meAuto): WinRMClient =
+               msgEnc = meAuto, sslNoVerify = false): WinRMClient =
+  proc makeHc(): HttpClient =
+    when defined(ssl):
+      if ssl and sslNoVerify:
+        let ctx = newContext(verifyMode = CVerifyNone)
+        return newHttpClient(timeout = 60_000, sslContext = ctx)
+    return newHttpClient(timeout = 60_000)
   result = WinRMClient(host: host, username: user, password: pass,
                        ntHash: ntHash,
                        spn: spn,
                        domain: domain, auth: auth, msgEnc: msgEnc, useSSL: ssl,
+                       sslNoVerify: sslNoVerify,
                        port: port,
                        sessionId: genUuid().toUpperAscii(),
-                       hc: (if auth == amNtlm and not ssl: nil else: newHttpClient(timeout = 60_000)),
+                       hc: (if auth == amNtlm and not ssl: nil else: makeHc()),
                        ntlmSock: nil,
                        ntlmReady: false,
                        ctx: nil,
@@ -2008,7 +2017,14 @@ proc resetHttpConnection(c: var WinRMClient) =
   if c.auth == amNtlm and not c.useSSL:
     c.hc = nil
   else:
-    c.hc = newHttpClient(timeout = 60_000)
+    when defined(ssl):
+      if c.useSSL and c.sslNoVerify:
+        let ctx = newContext(verifyMode = CVerifyNone)
+        c.hc = newHttpClient(timeout = 60_000, sslContext = ctx)
+      else:
+        c.hc = newHttpClient(timeout = 60_000)
+    else:
+      c.hc = newHttpClient(timeout = 60_000)
   c.ctx = nil
   c.authenticated = false
   c.ntlmCliSealRC4 = nil
@@ -3048,8 +3064,9 @@ proc uploadFileStream*(c: var WinRMClient, data: string, setup: string, total: i
 
     var retries = 0
     var output = ""
+    const UploadReceiveTimeout = 5
     while retries < 240:
-      let recvXml = c.send(soapReceiveCmd(c.host, c.port, c.useSSL, c.sessionId, shellId, cmdId))
+      let recvXml = c.send(soapReceiveCmd(c.host, c.port, c.useSSL, c.sessionId, shellId, cmdId, UploadReceiveTimeout))
       let chunk = decodeWinrsText(recvXml)
       if chunk.len > 0:
         output.add chunk

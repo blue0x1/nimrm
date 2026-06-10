@@ -1011,6 +1011,7 @@ Options:
   -k, --kerb       Use Kerberos auth (reads KRB5CCNAME env var)
   -c, --command    Execute one remote command, print output, then exit
       --tls        Use HTTPS on port 5986
+      --insecure   Skip TLS certificate verification
   -h, --help       This help
 
  Shell commands:
@@ -1047,6 +1048,27 @@ when defined(posix):
 
   proc tcgetattr(fd: cint; t: ptr Termios): cint {.importc, header: "<termios.h>".}
   proc tcsetattr(fd: cint; action: cint; t: ptr Termios): cint {.importc, header: "<termios.h>".}
+
+  type WinSize {.importc: "struct winsize", header: "<sys/ioctl.h>".} = object
+    ws_row, ws_col, ws_xpixel, ws_ypixel: cushort
+  proc ioctl(fd: cint; req: culong; arg: pointer): cint {.importc, header: "<sys/ioctl.h>".}
+  let TIOCGWINSZ {.importc, nodecl.}: culong
+
+  proc termWidth(): int =
+    var ws: WinSize
+    if ioctl(STDOUT_FILENO, TIOCGWINSZ, addr ws) == 0 and ws.ws_col > 0:
+      return ws.ws_col.int
+    80
+
+  proc visLen(s: string): int =
+    var i = 0
+    while i < s.len:
+      if s[i] == '\x1b' and i + 1 < s.len and s[i+1] == '[':
+        i += 2
+        while i < s.len and s[i] notin {'A'..'Z', 'a'..'z', 'm'}: inc i
+        inc i
+      else:
+        inc result; inc i
 
   const TCSANOW_C = 0.cint
   const F_ICANON  = 0x00000002.cuint
@@ -1237,12 +1259,26 @@ proc readLineHistory*(prompt: string; history: var seq[string];
 
     proc redraw() =
       let ghost = ghostSuffix()
-      stdout.write("\r\x1b[2K" & prompt & buf)
+      let tw = termWidth()
+      let plen = visLen(prompt)
+      let cursorAbsPos = plen + cursor
+      let cursorRow = cursorAbsPos div tw
+      if cursorRow > 0:
+        stdout.write("\x1b[" & $cursorRow & "A")
+      stdout.write("\r\x1b[J")
+      stdout.write(prompt & buf)
       if ghost.len > 0:
         stdout.write("\x1b[90m" & ghost & "\x1b[0m")
-      let back = buf.len - cursor + ghost.len
-      if back > 0:
-        stdout.write("\x1b[" & $back & "D")
+      let endAbsPos = plen + buf.len + ghost.len
+      let endRow = endAbsPos div tw
+      let finalRow = (plen + cursor) div tw
+      let finalCol = (plen + cursor) mod tw
+      let rowsDown = endRow - finalRow
+      if rowsDown > 0:
+        stdout.write("\x1b[" & $rowsDown & "A")
+      stdout.write("\r")
+      if finalCol > 0:
+        stdout.write("\x1b[" & $finalCol & "C")
       stdout.flushFile()
 
     while true:
@@ -1569,8 +1605,9 @@ proc createNewSession(args: seq[string]) =
   var host, username, password, ntHash, realm, spn: string
   var customPort = 0
   var portSet = false
-  var useKerb = false
-  var useSSL = false
+  var useKerb     = false
+  var useSSL      = false
+  var sslNoVerify = false
   var sessionName = ""
 
   var i = 0
@@ -1593,6 +1630,8 @@ proc createNewSession(args: seq[string]) =
       useKerb = true
     of "--tls", "--ssl":
       useSSL = true
+    of "--insecure":
+      sslNoVerify = true
     of "-p", "--port":
       if i + 1 < args.len:
         inc i
@@ -1668,7 +1707,7 @@ proc createNewSession(args: seq[string]) =
     return
 
   styledEcho(fgWhite, "[*] Connecting to " & host & ":" & $port & " ...")
-  var client = newClient(host, user, password, ntHash, spn, domain, authMethod, useSSL, port)
+  var client = newClient(host, user, password, ntHash, spn, domain, authMethod, useSSL, port, sslNoVerify = sslNoVerify)
 
   try:
     warmSmartShell(client)
@@ -1714,8 +1753,9 @@ proc main() =
   var host, username, password, ntHash, realm, spn, execCommand: string
   var customPort = 0
   var portSet = false
-  var useKerb = false
-  var useSSL  = false
+  var useKerb    = false
+  var useSSL     = false
+  var sslNoVerify = false
 
   var argv = commandLineParams()
   for i in 0..<argv.len:
@@ -1772,8 +1812,9 @@ proc main() =
       of "c", "command", "cmd", "exec":
         execCommand = nextVal(p)
       of "kerb-spn", "spn": spn = nextVal(p)
-      of "k", "kerb":  useKerb  = true
-      of "tls", "ssl": useSSL   = true
+      of "k", "kerb":    useKerb     = true
+      of "tls", "ssl":   useSSL      = true
+      of "insecure":     sslNoVerify = true
       of "h":
         if optKey == "H":
           ntHash = nextVal(p)
@@ -1844,7 +1885,7 @@ proc main() =
   echo ""
 
   let authMethod = if useKerb: amKerberos else: amNtlm
-  var client = newClient(host, user, password, ntHash, spn, domain, authMethod, useSSL, port)
+  var client = newClient(host, user, password, ntHash, spn, domain, authMethod, useSSL, port, sslNoVerify = sslNoVerify)
   if getEnv("WINRMSHELL_DEBUG") == "1":
     styledEcho(fgYellow, "[debug] client initialized")
 
