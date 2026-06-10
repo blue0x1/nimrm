@@ -2129,6 +2129,11 @@ proc doNtlm(c: var WinRMClient, body: string): tuple[status, body: string] =
   result = (r2.status, r2.body)
 
 proc doKerb(c: var WinRMClient, body: string): tuple[status, body: string] =
+  if c.hc == nil:
+    raise newException(IOError, "HTTP client not initialized")
+  if c.authenticated and c.ctx == nil:
+    c.authenticated = false
+
   var minor: GssUint32
 
   if not c.authenticated:

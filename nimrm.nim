@@ -123,12 +123,12 @@ proc keepAliveLocked(s: Session) =
   try:
     discard keepAliveSmart(s.client)
     s.lastKeepAliveAt = epochTime()
-  except CatchableError:
+  except Exception:
     try:
       resetTransport(s.client)
       warmSmartShell(s.client, false)
       s.lastKeepAliveAt = epochTime()
-    except CatchableError:
+    except Exception:
       s.connected = false
 
 proc resolveRemoteFile(c: var WinRMClient, setup, requested: string): tuple[path: string, size: int] =
