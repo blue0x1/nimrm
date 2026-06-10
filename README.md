@@ -198,6 +198,12 @@ One-shot command:
 ./nimrm -T 192.168.1.10 -A 'CORP\user' -P 'Password123' -c 'whoami'
 ```
 
+Skip TLS certificate verification (self-signed certs):
+
+```bash
+./nimrm -T 192.168.1.10 -A 'CORP\user' -P 'Password123' --tls --insecure
+```
+
 ## Options
 
 | Option | Description |
@@ -212,6 +218,7 @@ One-shot command:
 | `-k`, `--kerb` | Use Kerberos authentication |
 | `-c`, `--command` | Execute one command and exit |
 | `--tls` | Use HTTPS/TLS |
+| `--insecure` | Skip TLS certificate verification |
 | `-h`, `--help` | Show help |
 
 ## Interactive Commands
