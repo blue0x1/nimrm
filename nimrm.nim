@@ -115,10 +115,12 @@ proc remoteDisplayPwd(c: WinRMClient): string =
 proc isAuthFailure(e: ref Exception): bool =
   result = e of WinRMAuthorizationError
 
-proc keepAliveLocked(s: Session) =
+proc keepAliveLocked(s: Session, mainThread = false) =
   if s == nil or not s.connected:
     return
   if epochTime() - s.lastKeepAliveAt < KeepAliveIntervalSec:
+    return
+  if s.authStr == "Kerberos" and not mainThread:
     return
   try:
     discard keepAliveSmart(s.client)
@@ -1746,6 +1748,16 @@ when defined(posix):
   proc sigintHandler(sig: cint) {.noconv.} = sigintFlag = true
   posix.signal(SIGINT, sigintHandler)
 
+proc mainThreadKeepalive() =
+  let cur = activeSession()
+  if cur == nil: return
+  if epochTime() - cur.lastKeepAliveAt < KeepAliveIntervalSec: return
+  acquire(cur.lock)
+  try:
+    keepAliveLocked(cur, mainThread = true)
+  finally:
+    release(cur.lock)
+
 proc main() =
   randomize()
   initLock(sessionsLock)
@@ -1991,7 +2003,7 @@ proc main() =
     cur.lastKeepAliveAt = epochTime()
     var line: string
     try:
-      line = readLineHistory(promptStr, cmdHistory, completer = completeInteractiveInput).strip()
+      line = readLineHistory(promptStr, cmdHistory, onTick = mainThreadKeepalive, tickMs = 5000, completer = completeInteractiveInput).strip()
     except EOFError:
       echo ""; break
 
